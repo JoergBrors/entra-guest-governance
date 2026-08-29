@@ -33,12 +33,25 @@ public sealed class CosmosClientFactory
         // selbstsigniertes Zertifikat, das requirements.ps1 bereits fuer den REST-Layer
         // (SkipCertificateCheck) behandelt hat — Gateway-Mode zentralisiert dieselbe
         // Ausnahme fuer den SDK-Client, statt sie pro Request zu wiederholen.
+        //
+        // UseSystemTextJsonSerializerWithOptions statt SerializerOptions (mit denen sich
+        // beide gegenseitig ausschliessen, siehe CosmosClientOptions-Validierung): der
+        // eingebaute CosmosSerializationOptions-Typ kennt nur PropertyNamingPolicy, aber
+        // keinen Weg, Enums als String statt als Zahl zu serialisieren. Ohne
+        // JsonStringEnumConverter wurden Enum-Properties (z.B. AssignmentStatus) als
+        // numerischer Index gespeichert, waehrend Repository-Queries wie
+        // "c.status IN (@active, @approved, @requested)" gegen die STRING-Namen filtern —
+        // ein stiller String-vs-Zahl-Mismatch, der ListActiveByGuestAsync/
+        // ListByWorkloadAsync-mit-Statusfilter immer leer liefern liess (gefunden beim
+        // Live-Test des Excel-Gaeste-Imports: ein Fremd-Workload-Review wurde nicht
+        // erzeugt, obwohl eine aktive Zuweisung existierte).
         var clientOptions = new CosmosClientOptions
         {
             ConnectionMode = ConnectionMode.Gateway,
-            SerializerOptions = new CosmosSerializationOptions
+            UseSystemTextJsonSerializerWithOptions = new JsonSerializerOptions
             {
-                PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                Converters = { new JsonStringEnumConverter() },
             },
         };
 
