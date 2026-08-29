@@ -2,11 +2,11 @@ import { useEffect, useState } from 'react';
 import {
   Title2, Text, Card, Badge, Spinner, Button, Input, Field, makeStyles, tokens,
   MessageBar, MessageBarBody, Dialog, DialogTrigger, DialogSurface, DialogTitle,
-  DialogBody, DialogContent, DialogActions,
+  DialogBody, DialogContent, DialogActions, Select,
 } from '@fluentui/react-components';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import type { Workload, WorkloadAssignmentCounts } from '../types/domain';
+import type { GuestAccount, Workload, WorkloadAssignmentCounts } from '../types/domain';
 
 const useStyles = makeStyles({
   list: { display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '16px' },
@@ -32,6 +32,7 @@ export function WorkloadsAdminPage() {
   const styles = useStyles();
   const navigate = useNavigate();
   const [workloads, setWorkloads] = useState<Workload[] | null>(null);
+  const [guests, setGuests] = useState<GuestAccount[]>([]);
   const [counts, setCounts] = useState<Record<string, WorkloadAssignmentCounts>>({});
   const [error, setError] = useState<string | null>(null);
 
@@ -41,6 +42,9 @@ export function WorkloadsAdminPage() {
 
   const [roleForm, setRoleForm] = useState<Record<string, { name: string; mappings: string }>>({});
   const [resourceForm, setResourceForm] = useState<Record<string, { type: string; externalId: string }>>({});
+  const [newWorkloadName, setNewWorkloadName] = useState('');
+  const [newWorkloadOwner, setNewWorkloadOwner] = useState('');
+  const [assignForm, setAssignForm] = useState<Record<string, { guestId: string; roleId: string }>>({});
 
   const reload = () => {
     api.listWorkloads()
@@ -53,6 +57,7 @@ export function WorkloadsAdminPage() {
         });
       })
       .catch((e: Error) => setError(e.message));
+    api.listGuests().then(setGuests).catch(() => setGuests([]));
   };
 
   useEffect(reload, []);
@@ -141,6 +146,32 @@ export function WorkloadsAdminPage() {
     }
   };
 
+  const handleCreateWorkload = async () => {
+    if (!newWorkloadName) return;
+    setError(null);
+    try {
+      await api.createWorkload(newWorkloadName, newWorkloadOwner || null);
+      setNewWorkloadName('');
+      setNewWorkloadOwner('');
+      reload();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const handleAssignGuest = async (workloadId: string) => {
+    const form = assignForm[workloadId];
+    if (!form?.guestId || !form.roleId) return;
+    setError(null);
+    try {
+      await api.grantWorkloadRole(workloadId, form.guestId, form.roleId);
+      setAssignForm((prev) => ({ ...prev, [workloadId]: { guestId: '', roleId: '' } }));
+      reload();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const handleDeleteResource = async (workloadId: string, resourceId: string) => {
     setError(null);
     try {
@@ -164,6 +195,21 @@ export function WorkloadsAdminPage() {
           <MessageBarBody>{error}</MessageBarBody>
         </MessageBar>
       )}
+
+      <Card className={styles.card} style={{ marginTop: 16 }}>
+        <Text weight="semibold" block>Workload erstellen</Text>
+        <div className={styles.editForm}>
+          <Field label="Name">
+            <Input value={newWorkloadName} onChange={(_, d) => setNewWorkloadName(d.value)} />
+          </Field>
+          <Field label="Owner">
+            <Input value={newWorkloadOwner} onChange={(_, d) => setNewWorkloadOwner(d.value)} />
+          </Field>
+          <Button appearance="primary" onClick={handleCreateWorkload} disabled={!newWorkloadName}>
+            Erstellen
+          </Button>
+        </div>
+      </Card>
 
       <div className={styles.list}>
         {workloads.length === 0 && <Text>Noch keine Workloads angelegt.</Text>}
@@ -250,6 +296,41 @@ export function WorkloadsAdminPage() {
                 onChange={(_, d) => setResourceForm((prev) => ({ ...prev, [w.id]: { type: prev[w.id]?.type ?? '', externalId: d.value } }))}
               />
               <Button size="small" onClick={() => handleAddResource(w.id)}>Hinzufügen</Button>
+            </div>
+
+            <Text className={styles.subheading} block size={200}>Gast zuweisen</Text>
+            <div className={styles.editForm}>
+              <Field label="Gast">
+                <Select
+                  value={assignForm[w.id]?.guestId ?? ''}
+                  onChange={(event) => setAssignForm((prev) => ({
+                    ...prev,
+                    [w.id]: { guestId: event.target.value, roleId: prev[w.id]?.roleId ?? '' },
+                  }))}
+                >
+                  <option value="">Gast auswählen</option>
+                  {guests.map((guest) => <option key={guest.id} value={guest.id}>{guest.displayName} ({guest.mail})</option>)}
+                </Select>
+              </Field>
+              <Field label="Rolle">
+                <Select
+                  value={assignForm[w.id]?.roleId ?? ''}
+                  onChange={(event) => setAssignForm((prev) => ({
+                    ...prev,
+                    [w.id]: { guestId: prev[w.id]?.guestId ?? '', roleId: event.target.value },
+                  }))}
+                >
+                  <option value="">Rolle auswählen</option>
+                  {w.roles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
+                </Select>
+              </Field>
+              <Button
+                size="small"
+                onClick={() => handleAssignGuest(w.id)}
+                disabled={!assignForm[w.id]?.guestId || !assignForm[w.id]?.roleId}
+              >
+                Zuweisen
+              </Button>
             </div>
 
             <div className={styles.actions}>

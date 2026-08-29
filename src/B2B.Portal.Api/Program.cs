@@ -11,6 +11,7 @@ using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
 using B2B.Portal.Domain.Services;
 using B2B.Portal.Infrastructure;
+using B2B.Portal.Infrastructure.Directory;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -204,6 +205,20 @@ app.MapGet("/api/workloads", async (
         .Where(w => userCtx.Current.CanManageWorkload(w.Owner) || userCtx.Current.ScenarioManagerWorkloadIds.Contains(w.Id))
         .ToList();
     return Results.Ok(scoped);
+});
+
+app.MapPost("/api/workloads", async (
+    CreateWorkloadBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    WorkloadManagementService service, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var workload = await service.CreateWorkloadAsync(
+        tenantCtx.Current, body.Name, body.Owner, body.TemplateId, userCtx.Current.Mail, ct);
+    return Results.Created($"/api/workloads/{workload.Id}", workload);
 });
 
 app.MapPut("/api/workloads/{id:guid}", async (
@@ -793,6 +808,39 @@ app.MapPost("/api/guest-import/commit", async (
 // keine Graph-Schreibzugriffe (siehe README "Drei Development-Modi").
 if (mode == "LOCAL_MOCK")
 {
+    app.MapGet("/api/dev/mock-entra/users", (
+        IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        return Results.Ok(store.ListUsers());
+    });
+
+    app.MapGet("/api/dev/mock-entra/groups", (
+        IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        return Results.Ok(store.ListGroups());
+    });
+
+    app.MapGet("/api/dev/mock-entra/memberships", (
+        IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        return Results.Ok(store.ListAllMemberships());
+    });
+
     app.MapPost("/api/dev/seed/large-workload", async (
         SeedLargeWorkloadBody? body, ITenantContextAccessor tenantCtx,
         IWorkloadRepository workloadRepo, IGuestAccountRepository guestRepo,
@@ -928,6 +976,7 @@ public sealed record AssignmentBody(Guid GuestId, Guid RoleId);
 public sealed record DeletionValidationBody(bool GracePeriodReached);
 public sealed record ReviewDecisionBody(string Decision);
 public sealed record SeedLargeWorkloadBody(int? GuestCount, string? WorkloadName);
+public sealed record CreateWorkloadBody(string Name, string? Owner, string? TemplateId = null);
 public sealed record UpdateWorkloadBody(string Name, string? Owner);
 public sealed record UpsertWorkloadRoleBody(string Name, List<Guid> ResourceMappings);
 public sealed record UpsertWorkloadResourceBody(string ResourceType, string? ExternalId);

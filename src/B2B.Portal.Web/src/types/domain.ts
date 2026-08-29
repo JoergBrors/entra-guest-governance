@@ -214,3 +214,34 @@ export interface UiConfiguration {
     roles: string[];
   };
 }
+
+export interface MockEntraUser {
+  objectId: string;
+  userPrincipalName: string;
+  mail: string;
+  displayName: string;
+  givenName: string;
+  surname: string;
+  companyName: string;
+  department: string;
+  jobTitle: string;
+  sponsor: string;
+  accountEnabled: string;
+  userType: string;
+}
+
+export interface MockEntraGroup {
+  objectId: string;
+  displayName: string;
+  mailNickname: string;
+  description: string;
+  groupType: string;
+  securityEnabled: boolean;
+  workloadName?: string | null;
+}
+
+export interface MockEntraMembership {
+  groupId: string;
+  groupName: string;
+  entraObjectId: string;
+}

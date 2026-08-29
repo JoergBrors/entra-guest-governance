@@ -149,6 +149,11 @@ export function AppLayout({ productName, userMail, roles, platformTenantId, them
             <NavLink to="/dev/theme-preview" className={styles.navLink}>
               Theme Preview
             </NavLink>
+            {isAdmin && (
+              <NavLink to="/dev/mock-entra" className={styles.navLink}>
+                Mock Entra
+              </NavLink>
+            )}
           </>
         )}
       </nav>

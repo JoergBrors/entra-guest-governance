@@ -4,6 +4,7 @@ import type {
   WorkloadScenario, ScenarioTemplateDto, ScenarioImportResult,
   GuestImportInspectResult, GuestImportColumnMapping, GuestImportResult,
   UiConfiguration,
+  MockEntraGroup, MockEntraMembership, MockEntraUser,
 } from '../types/domain';
 
 // API_BASE_URL und der Platform-Tenant kommen aus Vite-Env-Variablen (siehe .env.example
@@ -103,6 +104,9 @@ export const api = {
   health: () => request<{ status: string; mode: string }>('/health'),
   uiConfiguration: () => request<UiConfiguration>('/api/ui/configuration'),
   myNavigation: () => request<{ items: string[] }>('/api/me/navigation'),
+  listMockEntraUsers: () => request<MockEntraUser[]>('/api/dev/mock-entra/users'),
+  listMockEntraGroups: () => request<MockEntraGroup[]>('/api/dev/mock-entra/groups'),
+  listMockEntraMemberships: () => request<MockEntraMembership[]>('/api/dev/mock-entra/memberships'),
 
   listGuests: () => request<GuestAccount[]>('/api/guest-accounts'),
   getGuest: (id: string) => request<GuestAccount>(`/api/guest-accounts/${id}`),
@@ -112,6 +116,11 @@ export const api = {
   listWorkloads: () => request<Workload[]>('/api/workloads'),
   listMyWorkloads: () => request<Workload[]>('/api/me/workloads'),
   getWorkload: (id: string) => request<Workload>(`/api/workloads/${id}`),
+  createWorkload: (name: string, owner: string | null, templateId?: string | null) =>
+    request<Workload>('/api/workloads', {
+      method: 'POST',
+      body: JSON.stringify({ name, owner, templateId }),
+    }),
 
   updateWorkload: (workloadId: string, name: string, owner: string | null) =>
     request<Workload>(`/api/workloads/${workloadId}`, {

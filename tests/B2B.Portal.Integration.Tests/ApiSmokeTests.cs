@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
@@ -77,5 +78,39 @@ public class ApiSmokeTests(WebApplicationFactory<Program> factory) : IClassFixtu
         response.EnsureSuccessStatusCode();
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("corporate-vibrant", body);
+    }
+
+    [Fact]
+    public async Task Workloads_AdminCanCreateWorkload()
+    {
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-create-workload-test");
+        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "admin@platform.example");
+        client.DefaultRequestHeaders.Add("X-Portal-Roles", "GovernanceAdmin");
+
+        var response = await client.PostAsJsonAsync("/api/workloads", new
+        {
+            name = "Admin Created Workload",
+            owner = "owner@platform.example",
+        });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("Admin Created Workload", body);
+    }
+
+    [Fact]
+    public async Task MockEntra_AdminCanReadUsers()
+    {
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-mock-entra-test");
+        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "admin@platform.example");
+        client.DefaultRequestHeaders.Add("X-Portal-Roles", "GovernanceAdmin");
+
+        var response = await client.GetAsync("/api/dev/mock-entra/users");
+
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("anna@contoso.example", body);
     }
 }

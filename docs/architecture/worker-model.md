@@ -12,3 +12,11 @@ Kernbestand:
 
 Der Dispatcher prueft `PlatformTenantId`, nutzt Retry/DeadLetter und delegiert an registrierte Handler.
 
+## Mock-Entra-Verarbeitung
+
+Im `LOCAL_MOCK` teilen sich `MockGuestDirectory` und `MockResourceConnector` den `MockEntraDirectoryStore`.
+
+- `DiscoveryHandler` liest Benutzer und Gruppenmitgliedschaften.
+- `DeployScenarioHandler` legt Gruppen ueber `CreateResourceAsync` an.
+- `GrantWorkloadRoleHandler` loest Workload-Rollen auf Ressourcen auf und fuegt den Gast zu den Gruppen hinzu.
+- `RevokeWorkloadRoleHandler` entfernt die Gruppenmitgliedschaften.

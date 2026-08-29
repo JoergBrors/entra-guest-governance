@@ -23,6 +23,26 @@ public sealed class WorkloadManagementService(
     IAssignmentRepository assignmentRepository,
     AuditService auditService)
 {
+    public async Task<Workload> CreateWorkloadAsync(
+        TenantContext tenant, string name, string? owner, string? templateId, string actor, CancellationToken ct)
+    {
+        var workload = new Workload
+        {
+            PlatformTenantId = tenant.PlatformTenantId,
+            Name = name,
+            Owner = owner,
+            TemplateId = templateId,
+        };
+
+        await workloadRepository.UpsertAsync(workload, ct);
+
+        await auditService.RecordAsync(
+            tenant.PlatformTenantId, actor, "CreateWorkload", nameof(Workload),
+            workload.Id.ToString(), "Accepted", Guid.NewGuid(), ct: ct);
+
+        return workload;
+    }
+
     public async Task<Workload> UpdateWorkloadAsync(
         TenantContext tenant, Guid workloadId, string name, string? owner, string actor, CancellationToken ct)
     {

@@ -9,6 +9,8 @@ Admin-Funktionen:
 - Guest Pool lesen
 - Gaeste einladen
 - Guest Import Preview/Commit
+- Workload erstellen
+- Gast einer Workload-Rolle zuweisen
 - Reviews lesen/entscheiden
 - Audit lesen
 - globale Workload-Liste lesen
@@ -22,4 +24,3 @@ Workload Owner:
 Scenario Manager:
 
 - darf innerhalb des konfigurierten Workload-/Szenario-Scopes agieren.
-

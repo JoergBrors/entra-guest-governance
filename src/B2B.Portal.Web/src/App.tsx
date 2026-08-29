@@ -17,6 +17,7 @@ import { JobsPage } from './pages/JobsPage';
 import { CompliancePage } from './pages/CompliancePage';
 import { DiscoveryPage } from './pages/DiscoveryPage';
 import { DevThemePreviewPage } from './pages/DevThemePreviewPage';
+import { MockEntraPage } from './pages/MockEntraPage';
 import { api } from './api/client';
 import type { UiConfiguration } from './types/domain';
 import { loadPortalTheme } from './themes/theme-loader';
@@ -81,6 +82,7 @@ export function App() {
             <Route path="discovery" element={<DiscoveryPage />} />
             <Route path="jobs" element={<JobsPage />} />
             {import.meta.env.DEV && <Route path="dev/theme-preview" element={<DevThemePreviewPage />} />}
+            {import.meta.env.DEV && <Route path="dev/mock-entra" element={<MockEntraPage />} />}
           </Route>
         </Routes>
       </BrowserRouter>

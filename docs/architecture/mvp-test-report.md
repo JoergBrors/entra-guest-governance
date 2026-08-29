@@ -197,9 +197,34 @@ Nicht als produktiv verifiziert:
 - Produktive Tenant-Theme-Zuordnung: `integration pending`.
 - Echte Graph Directory Integration: `integration pending`.
 
+## 10. Erweiterung 2026-08-29: Admin Workload Create und Mock Entra
+
+Ausgefuehrte Checks:
+
+| Check | Ergebnis |
+| --- | --- |
+| `dotnet build -c Debug` | erfolgreich, 0 Warnungen, 0 Fehler |
+| `dotnet test -c Debug` | erfolgreich, 42 Integrationstests plus bestehende Domain/Application/Architecture-Tests bestanden |
+| `npm run build` | erfolgreich, Vite Build erzeugt `dist` |
+| `npm run test -- --run` | erfolgreich, 5 Tests bestanden |
+
+Ergaenzte Funktionen:
+
+- `POST /api/workloads` fuer `GovernanceAdmin`.
+- Workloads-Admin-UI mit Workload-Erstellung.
+- Workloads-Admin-UI mit Gast-zu-Rolle-Zuweisung.
+- `MockEntraDirectoryStore` mit Benutzern, Gruppen und Mitgliedschaften.
+- Worker-Grant/Revoke loest Rollen auf Workload-Ressourcen auf und schreibt Gruppenmitgliedschaften im Mock.
+
+Ergaenzte Tests:
+
+- Admin kann Workload per API erstellen.
+- Mock Directory enthaelt Benutzer, Gruppen und Memberships.
+- Mock Connector legt Gruppen an und weist Mitglieder zu.
+
 ## Gesamtstatus
 
 **PASS WITH PENDING INTEGRATIONS** — Frontend und Backend bauen und testen vollständig
-grün (39/39 .NET-Tests, 5/5 Frontend-Tests). Offen bleiben ausschließlich die bewusst
+grün (42 Integrationstests plus bestehende Domain/Application/Architecture-Tests, 5/5 Frontend-Tests). Offen bleiben ausschließlich die bewusst
 nicht simulierten externen Integrationen (echter Graph-Write, echter Mail-Versand,
 Token-Validierung) sowie die in Abschnitt 7/8 genannten funktionalen Lücken.

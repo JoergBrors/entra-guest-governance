@@ -27,6 +27,11 @@ Technische Details sind fuer Governance/Admin sichtbar.
 Quelle: `GET /api/workloads/{id}`.
 Normale Benutzer erhalten nur die eigene Rolle und eigene Ressourcen.
 
+## Workloads Admin
+
+Quelle: `GET /api/workloads`, `POST /api/workloads`, `POST /api/workloads/{workloadId}/assignments`.
+Governance/Admin kann Workloads erstellen und Gaeste Rollen zuweisen. Der Worker setzt die Zuweisung technisch ueber Gruppenmitgliedschaften im Mock um.
+
 ## Access Request
 
 Quelle: `GET /api/me/workloads`.
@@ -40,4 +45,3 @@ Entscheidung: `POST /api/reviews/{reviewInstanceId}/items/{reviewItemId}/decisio
 ## Jobs, Compliance, Discovery
 
 Seiten existieren. Detaillierte produktive APIs: `integration pending`.
-

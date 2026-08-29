@@ -41,3 +41,20 @@ Zusaetzliche fachliche Fakten:
 
 Keine produktiven Tenant-, Client-, Mailbox- oder Corporate-Design-Werte wurden erfunden.
 
+## Folgeerweiterung: Admin Workload Create und Mock Entra
+
+Umgesetzt:
+
+- Admin kann Workloads per API und GUI erstellen.
+- Admin kann Gaeste in der Workload-Admin-Ansicht Rollen zuweisen.
+- Der LOCAL_MOCK enthaelt einen Entra-ID-Mock-Stamm mit Benutzern, Gruppen und Memberships.
+- Worker-Discovery liest Benutzer und Gruppenmitgliedschaften aus dem Mock.
+- Worker-Deploy kann Gruppen im Mock anlegen.
+- Worker-Grant/Revoke weist Gruppenmitgliedschaften im Mock zu oder entfernt sie.
+
+Verifikation:
+
+- `dotnet build -c Debug`: erfolgreich.
+- `dotnet test -c Debug`: erfolgreich.
+- `npm run build`: erfolgreich.
+- `npm run test -- --run`: erfolgreich.

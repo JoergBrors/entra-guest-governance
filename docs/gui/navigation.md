@@ -25,5 +25,9 @@ Governance/Admin sieht zusaetzlich:
 - Jobs
 - Audit
 
-Workload Owner und Scenario Manager sehen Workloads fuer ihren Scope. Die API bleibt die massgebliche Durchsetzung; die Navigation ist nur die sichtbare Auswahl.
+Development Navigation:
 
+- Theme Preview
+- Mock Entra fuer Governance/Admin
+
+Workload Owner und Scenario Manager sehen Workloads fuer ihren Scope. Die API bleibt die massgebliche Durchsetzung; die Navigation ist nur die sichtbare Auswahl.

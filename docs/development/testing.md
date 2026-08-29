@@ -11,7 +11,7 @@ Ausgefuehrte Checks fuer die Erweiterung:
 
 Ergebnisse:
 
-- .NET: 39 Tests bestanden.
+- .NET: 42 Integrationstests plus bestehende Domain/Application/Architecture-Tests bestanden.
 - Frontend: 5 Tests bestanden.
 
 Hinweis: `npm` meldete beim Start eine lokale Zugriffswarnung auf `C:\Users\JoergBrors\AppData\Roaming\npm\node_modules\npm\bin\npm-cli.js`; Build und Tests liefen trotzdem erfolgreich.
