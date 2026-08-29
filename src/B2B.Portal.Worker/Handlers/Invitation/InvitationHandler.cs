@@ -1,6 +1,7 @@
 using System.Text.Json;
 using B2B.Portal.Application.Ports;
 using B2B.Portal.Domain.Entities;
+using B2B.Portal.Domain.ValueObjects;
 using B2B.Portal.Worker.Processing;
 using Microsoft.Extensions.Logging;
 
@@ -23,7 +24,8 @@ public sealed class InvitationHandler(
         var mail = payload.GetProperty("Mail").GetString()!;
         var displayName = payload.GetProperty("DisplayName").GetString()!;
 
-        var guest = await guestRepository.GetAsync(job.PlatformTenantId, Guid.Parse(job.EntityId), ct);
+        var guest = await guestRepository.GetAsync(
+            TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), Guid.Parse(job.EntityId), ct);
         if (guest is null)
         {
             logger.LogWarning("InviteGuest: GuestAccount {EntityId} nicht gefunden.", job.EntityId);

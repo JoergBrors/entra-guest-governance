@@ -14,6 +14,7 @@ public sealed class LocalJobQueue : IJobQueue
     private readonly ConcurrentQueue<JobEnvelope> _pending = new();
     private readonly ConcurrentDictionary<Guid, JobEnvelope> _inFlight = new();
     private readonly ConcurrentDictionary<Guid, (JobEnvelope Job, string Error)> _deadLetters = new();
+    private readonly ConcurrentDictionary<Guid, int> _attempts = new();
     public int RetryCounter { get; private set; }
 
     public IReadOnlyCollection<(JobEnvelope Job, string Error)> DeadLetters => _deadLetters.Values.ToArray();
@@ -41,20 +42,42 @@ public sealed class LocalJobQueue : IJobQueue
         return Task.CompletedTask;
     }
 
-    public Task RetryAsync(Guid jobId, string error, CancellationToken ct)
+    public Task<int> RetryAsync(Guid jobId, string error, CancellationToken ct)
     {
+        var attempt = _attempts.AddOrUpdate(jobId, 1, (_, current) => current + 1);
+
         if (_inFlight.TryRemove(jobId, out var job))
         {
             RetryCounter++;
             _pending.Enqueue(job);
         }
 
-        return Task.CompletedTask;
+        return Task.FromResult(attempt);
     }
 
     public Task DeadLetterAsync(Guid jobId, string error, CancellationToken ct)
     {
-        if (_inFlight.TryRemove(jobId, out var job))
+        // Der Job kann bereits per RetryAsync zurueck nach _pending verschoben worden sein,
+        // wenn der Dispatcher zunaechst RetryAsync aufruft (um den neuen Attempt-Zaehler zu
+        // erhalten) und danach anhand dieses Zaehlers doch DeadLetterAsync waehlt. Daher hier
+        // aus beiden moeglichen Fundorten entfernen, nicht nur aus _inFlight.
+        JobEnvelope? job = null;
+        if (_inFlight.TryRemove(jobId, out var inFlightJob))
+        {
+            job = inFlightJob;
+        }
+        else
+        {
+            var remaining = new List<JobEnvelope>();
+            while (_pending.TryDequeue(out var candidate))
+            {
+                if (candidate.JobId == jobId) { job = candidate; }
+                else { remaining.Add(candidate); }
+            }
+            foreach (var r in remaining) { _pending.Enqueue(r); }
+        }
+
+        if (job is not null)
         {
             _deadLetters[jobId] = (job, error);
         }

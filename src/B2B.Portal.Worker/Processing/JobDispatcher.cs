@@ -16,7 +16,6 @@ public sealed class JobDispatcher(
     private const int MaxRetries = 3;
     private readonly Dictionary<string, IJobHandler> _handlersByType =
         handlers.ToDictionary(h => h.JobType, StringComparer.Ordinal);
-    private readonly Dictionary<Guid, int> _attempts = new();
 
     /// <summary>Verarbeitet genau einen anstehenden Job, falls vorhanden. Gibt true zurück, wenn ein Job verarbeitet wurde.</summary>
     public async Task<bool> ProcessNextAsync(CancellationToken ct)
@@ -52,9 +51,11 @@ public sealed class JobDispatcher(
         }
         catch (Exception ex)
         {
-            _attempts.TryGetValue(job.JobId, out var attempt);
-            attempt++;
-            _attempts[job.JobId] = attempt;
+            // Der Attempt-Zaehler wird von der IJobQueue-Implementierung selbst gefuehrt
+            // (dauerhaft bei CosmosJobQueue, in-memory bei LocalJobQueue) statt hier im
+            // Dispatcher, damit er einen Worker-Neustart bzw. mehrere Worker-Instanzen
+            // uebersteht (siehe IJobQueue.RetryAsync-Dokumentation).
+            var attempt = await jobQueue.RetryAsync(job.JobId, ex.Message, ct);
 
             if (attempt >= MaxRetries)
             {
@@ -64,7 +65,6 @@ public sealed class JobDispatcher(
             else
             {
                 logger.LogWarning(ex, "Job {JobId} fehlgeschlagen (Versuch {Attempt}) -> Retry", job.JobId, attempt);
-                await jobQueue.RetryAsync(job.JobId, ex.Message, ct);
             }
         }
 

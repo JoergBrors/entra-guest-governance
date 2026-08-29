@@ -1,6 +1,7 @@
 using B2B.Portal.Application.Commands;
 using B2B.Portal.Application.Services;
 using B2B.Portal.Domain.Enums;
+using B2B.Portal.Domain.ValueObjects;
 using B2B.Portal.Infrastructure.Data;
 using B2B.Portal.Infrastructure.Queue;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -46,7 +47,8 @@ public class GrantWorkloadRoleIdempotencyTests
 
         Assert.Equal(first.Id, second.Id);
 
-        var allForGuest = await assignmentRepo.ListByGuestAsync("tenant-a", request.GuestId, CancellationToken.None);
+        var allForGuest = await assignmentRepo.ListByGuestAsync(
+            TenantContext.Create("tenant-a"), request.GuestId, CancellationToken.None);
         Assert.Single(allForGuest);
     }
 }

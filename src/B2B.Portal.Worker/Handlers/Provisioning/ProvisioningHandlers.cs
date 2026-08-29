@@ -1,6 +1,7 @@
 using B2B.Portal.Application.Ports;
 using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
+using B2B.Portal.Domain.ValueObjects;
 using B2B.Portal.Worker.Processing;
 using Microsoft.Extensions.Logging;
 
@@ -23,7 +24,8 @@ public sealed class GrantWorkloadRoleHandler(
         var assignmentId = Guid.Parse(job.EntityId);
         var guestId = job.Payload.GetProperty("GuestId").GetGuid();
 
-        var assignments = await assignmentRepository.ListByGuestAsync(job.PlatformTenantId, guestId, ct);
+        var assignments = await assignmentRepository.ListByGuestAsync(
+            TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), guestId, ct);
         var assignment = assignments.FirstOrDefault(a => a.Id == assignmentId);
         if (assignment is null)
         {

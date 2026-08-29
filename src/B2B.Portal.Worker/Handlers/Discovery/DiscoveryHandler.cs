@@ -1,6 +1,7 @@
 using B2B.Portal.Application.Ports;
 using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
+using B2B.Portal.Domain.ValueObjects;
 using B2B.Portal.Worker.Processing;
 using Microsoft.Extensions.Logging;
 
@@ -22,11 +23,12 @@ public sealed class DiscoveryHandler(
     public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var directoryTenantId = job.DirectoryTenantId ?? string.Empty;
+        var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
         var guests = await guestDirectory.ListGuestsAsync(directoryTenantId, ct);
 
         foreach (var snapshot in guests)
         {
-            var existing = (await guestRepository.ListAsync(job.PlatformTenantId, ct))
+            var existing = (await guestRepository.ListAsync(tenant, ct))
                 .FirstOrDefault(g => g.EntraObjectId == snapshot.EntraObjectId);
 
             var guest = existing ?? new GuestAccount

@@ -1,4 +1,5 @@
 using B2B.Portal.Domain.Entities;
+using B2B.Portal.Domain.ValueObjects;
 using B2B.Portal.Infrastructure.Data;
 using Xunit;
 
@@ -25,7 +26,7 @@ public class TenantIsolationTests
         };
         await repo.UpsertAsync(guestOfTenantA, CancellationToken.None);
 
-        var readAsTenantB = await repo.GetAsync("tenant-b", guestOfTenantA.Id, CancellationToken.None);
+        var readAsTenantB = await repo.GetAsync(TenantContext.Create("tenant-b"), guestOfTenantA.Id, CancellationToken.None);
 
         Assert.Null(readAsTenantB);
     }
@@ -47,8 +48,8 @@ public class TenantIsolationTests
             Mail = "b@tenant-b.example", DisplayName = "B",
         }, CancellationToken.None);
 
-        var tenantAGuests = await repo.ListAsync("tenant-a", CancellationToken.None);
-        var tenantBGuests = await repo.ListAsync("tenant-b", CancellationToken.None);
+        var tenantAGuests = await repo.ListAsync(TenantContext.Create("tenant-a"), CancellationToken.None);
+        var tenantBGuests = await repo.ListAsync(TenantContext.Create("tenant-b"), CancellationToken.None);
 
         Assert.Single(tenantAGuests);
         Assert.Single(tenantBGuests);
@@ -73,7 +74,7 @@ public class TenantIsolationTests
             EntityType = "Guest", EntityId = "2", Result = "Success",
         }, CancellationToken.None);
 
-        var eventsForA = await writer.QueryAsync("tenant-a", 100, CancellationToken.None);
+        var eventsForA = await writer.QueryAsync(TenantContext.Create("tenant-a"), 100, CancellationToken.None);
 
         Assert.Single(eventsForA);
         Assert.Equal("tenant-a", eventsForA[0].PlatformTenantId);

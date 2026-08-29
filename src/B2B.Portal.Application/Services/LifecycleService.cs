@@ -2,6 +2,7 @@ using B2B.Portal.Application.Ports;
 using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
 using B2B.Portal.Domain.Services;
+using B2B.Portal.Domain.ValueObjects;
 
 namespace B2B.Portal.Application.Services;
 
@@ -27,14 +28,16 @@ public sealed class LifecycleService(
     public async Task<DeletionGateEvaluation> EvaluateDeletionAsync(
         string platformTenantId, Guid guestId, bool gracePeriodReached, Guid correlationId, CancellationToken ct)
     {
-        var guest = await guestRepository.GetAsync(platformTenantId, guestId, ct)
+        var tenant = TenantContext.Create(platformTenantId);
+
+        var guest = await guestRepository.GetAsync(tenant, guestId, ct)
             ?? throw new InvalidOperationException($"GuestAccount {guestId} nicht gefunden.");
 
-        var activeAssignments = await assignmentRepository.ListActiveByGuestAsync(platformTenantId, guestId, ct);
-        var unclassified = (await resourceAccessRepository.ListByGuestAsync(platformTenantId, guestId, ct))
+        var activeAssignments = await assignmentRepository.ListActiveByGuestAsync(tenant, guestId, ct);
+        var unclassified = (await resourceAccessRepository.ListByGuestAsync(tenant, guestId, ct))
             .Count(a => a.Classification == AccessClassification.Unclassified);
-        var openJobs = await jobRepository.ListOpenSecurityRelevantAsync(platformTenantId, guestId, ct);
-        var openReviews = (await reviewRepository.ListOpenAsync(platformTenantId, ct)).Count;
+        var openJobs = await jobRepository.ListOpenSecurityRelevantAsync(tenant, guestId, ct);
+        var openReviews = (await reviewRepository.ListOpenAsync(tenant, ct)).Count;
 
         var connectorError = false;
         var liveAccessFound = false;

@@ -3,6 +3,7 @@ using B2B.Portal.Application.Services;
 using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
 using B2B.Portal.Domain.Services;
+using B2B.Portal.Domain.ValueObjects;
 using B2B.Portal.Worker.Processing;
 using Microsoft.Extensions.Logging;
 
@@ -45,7 +46,8 @@ public sealed class DisableGuestHandler(IGuestAccountRepository guestRepository,
 
     public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
     {
-        var guest = await guestRepository.GetAsync(job.PlatformTenantId, Guid.Parse(job.EntityId), ct);
+        var guest = await guestRepository.GetAsync(
+            TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), Guid.Parse(job.EntityId), ct);
         if (guest is null)
         {
             logger.LogWarning("DisableGuest: Guest {EntityId} nicht gefunden.", job.EntityId);
@@ -80,7 +82,8 @@ public sealed class DeleteGuestHandler(
             return;
         }
 
-        var guest = await guestRepository.GetAsync(job.PlatformTenantId, Guid.Parse(job.EntityId), ct);
+        var guest = await guestRepository.GetAsync(
+            TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), Guid.Parse(job.EntityId), ct);
         if (guest is null)
         {
             return;

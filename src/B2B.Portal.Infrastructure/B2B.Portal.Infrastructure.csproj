@@ -9,6 +9,12 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+    <!-- Nur fuer DATA_PROVIDER=cosmos (opt-in, Default bleibt InMemory). Newtonsoft.Json
+         wird trotz System.Text.Json-Serializer intern von Microsoft.Azure.Cosmos'
+         DocumentClient zur Laufzeit benoetigt (nicht nur ein Build-Time-Check) - explizit
+         referenziert statt nur den Build-Check zu umgehen. -->
+    <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.46.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
 
   <ItemGroup>

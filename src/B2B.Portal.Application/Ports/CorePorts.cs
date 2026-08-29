@@ -1,4 +1,5 @@
 using B2B.Portal.Domain.Entities;
+using B2B.Portal.Domain.ValueObjects;
 
 namespace B2B.Portal.Application.Ports;
 
@@ -14,7 +15,13 @@ public interface IJobQueue
 
     Task CompleteAsync(Guid jobId, CancellationToken ct);
 
-    Task RetryAsync(Guid jobId, string error, CancellationToken ct);
+    /// <summary>
+    /// Markiert einen Job für einen erneuten Versuch. Liefert den neuen, dauerhaften
+    /// Attempt-Zähler zurück — die Queue-Implementierung führt diesen Zähler selbst
+    /// (statt eines nicht-persistenten In-Prozess-Zählers im JobDispatcher), damit er
+    /// einen Worker-Neustart oder mehrere Worker-Instanzen übersteht.
+    /// </summary>
+    Task<int> RetryAsync(Guid jobId, string error, CancellationToken ct);
 
     Task DeadLetterAsync(Guid jobId, string error, CancellationToken ct);
 }
@@ -41,7 +48,7 @@ public interface IAuditWriter
 {
     Task WriteAsync(AuditEvent auditEvent, CancellationToken ct);
 
-    Task<IReadOnlyList<AuditEvent>> QueryAsync(string platformTenantId, int take, CancellationToken ct);
+    Task<IReadOnlyList<AuditEvent>> QueryAsync(TenantContext tenant, int take, CancellationToken ct);
 }
 
 /// <summary>Für deterministische Tests austauschbare Zeitquelle.</summary>
@@ -51,49 +58,51 @@ public interface IClock
 }
 
 // ---- Repositories -------------------------------------------------------
-// Alle Repositories erzwingen Tenant-Isolation über platformTenantId als Pflichtparameter.
+// Alle Repositories erzwingen Tenant-Isolation über TenantContext als Pflichtparameter
+// (statt eines nackten String — der Kontext trägt zusätzlich DirectoryTenantId und die
+// Owns(...)-Vergleichslogik, siehe B2B.Portal.Domain.ValueObjects.TenantContext).
 
 public interface IGuestAccountRepository
 {
-    Task<GuestAccount?> GetAsync(string platformTenantId, Guid id, CancellationToken ct);
-    Task<IReadOnlyList<GuestAccount>> ListAsync(string platformTenantId, CancellationToken ct);
+    Task<GuestAccount?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
+    Task<IReadOnlyList<GuestAccount>> ListAsync(TenantContext tenant, CancellationToken ct);
     Task UpsertAsync(GuestAccount guest, CancellationToken ct);
 }
 
 public interface IWorkloadRepository
 {
-    Task<Workload?> GetAsync(string platformTenantId, Guid id, CancellationToken ct);
-    Task<IReadOnlyList<Workload>> ListAsync(string platformTenantId, CancellationToken ct);
+    Task<Workload?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
+    Task<IReadOnlyList<Workload>> ListAsync(TenantContext tenant, CancellationToken ct);
     Task UpsertAsync(Workload workload, CancellationToken ct);
 }
 
 public interface IAssignmentRepository
 {
     Task<IReadOnlyList<GuestWorkloadAssignment>> ListByGuestAsync(
-        string platformTenantId, Guid guestId, CancellationToken ct);
+        TenantContext tenant, Guid guestId, CancellationToken ct);
     Task<IReadOnlyList<GuestWorkloadAssignment>> ListActiveByGuestAsync(
-        string platformTenantId, Guid guestId, CancellationToken ct);
+        TenantContext tenant, Guid guestId, CancellationToken ct);
     Task UpsertAsync(GuestWorkloadAssignment assignment, CancellationToken ct);
 }
 
 public interface IReviewRepository
 {
-    Task<ReviewInstance?> GetAsync(string platformTenantId, Guid id, CancellationToken ct);
-    Task<IReadOnlyList<ReviewInstance>> ListOpenAsync(string platformTenantId, CancellationToken ct);
+    Task<ReviewInstance?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
+    Task<IReadOnlyList<ReviewInstance>> ListOpenAsync(TenantContext tenant, CancellationToken ct);
     Task UpsertAsync(ReviewInstance instance, CancellationToken ct);
 }
 
 public interface IJobRepository
 {
-    Task<DirectoryOperation?> GetAsync(string platformTenantId, Guid id, CancellationToken ct);
+    Task<DirectoryOperation?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
     Task<IReadOnlyList<DirectoryOperation>> ListOpenSecurityRelevantAsync(
-        string platformTenantId, Guid guestId, CancellationToken ct);
+        TenantContext tenant, Guid guestId, CancellationToken ct);
     Task UpsertAsync(DirectoryOperation job, CancellationToken ct);
 }
 
 public interface IResourceAccessRepository
 {
     Task<IReadOnlyList<ResourceAccess>> ListByGuestAsync(
-        string platformTenantId, Guid guestId, CancellationToken ct);
+        TenantContext tenant, Guid guestId, CancellationToken ct);
     Task UpsertAsync(ResourceAccess access, CancellationToken ct);
 }

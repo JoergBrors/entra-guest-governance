@@ -41,35 +41,35 @@ app.MapGet("/health", () => Results.Ok(new { status = "healthy", mode }));
 app.MapGet("/api/guest-accounts", async (
     ITenantContextAccessor tenantCtx, IGuestAccountRepository repo, CancellationToken ct) =>
 {
-    var guests = await repo.ListAsync(tenantCtx.Current.PlatformTenantId, ct);
+    var guests = await repo.ListAsync(tenantCtx.Current, ct);
     return Results.Ok(guests);
 });
 
 app.MapGet("/api/guest-accounts/{id:guid}", async (
     Guid id, ITenantContextAccessor tenantCtx, IGuestAccountRepository repo, CancellationToken ct) =>
 {
-    var guest = await repo.GetAsync(tenantCtx.Current.PlatformTenantId, id, ct);
+    var guest = await repo.GetAsync(tenantCtx.Current, id, ct);
     return guest is null ? Results.NotFound() : Results.Ok(guest);
 });
 
 app.MapGet("/api/workloads", async (
     ITenantContextAccessor tenantCtx, IWorkloadRepository repo, CancellationToken ct) =>
 {
-    var workloads = await repo.ListAsync(tenantCtx.Current.PlatformTenantId, ct);
+    var workloads = await repo.ListAsync(tenantCtx.Current, ct);
     return Results.Ok(workloads);
 });
 
 app.MapGet("/api/reviews", async (
     ITenantContextAccessor tenantCtx, IReviewRepository repo, CancellationToken ct) =>
 {
-    var reviews = await repo.ListOpenAsync(tenantCtx.Current.PlatformTenantId, ct);
+    var reviews = await repo.ListOpenAsync(tenantCtx.Current, ct);
     return Results.Ok(reviews);
 });
 
 app.MapGet("/api/audit-events", async (
     ITenantContextAccessor tenantCtx, IAuditWriter auditWriter, CancellationToken ct) =>
 {
-    var events = await auditWriter.QueryAsync(tenantCtx.Current.PlatformTenantId, take: 100, ct);
+    var events = await auditWriter.QueryAsync(tenantCtx.Current, take: 100, ct);
     return Results.Ok(events);
 });
 
@@ -100,7 +100,7 @@ app.MapPost("/api/assignments/{id:guid}/revoke", async (
     Guid id, ITenantContextAccessor tenantCtx, IAssignmentRepository assignmentRepo,
     RevokeWorkloadRoleCommandHandler handler, CancellationToken ct) =>
 {
-    var assignment = (await assignmentRepo.ListByGuestAsync(tenantCtx.Current.PlatformTenantId, id, ct))
+    var assignment = (await assignmentRepo.ListByGuestAsync(tenantCtx.Current, id, ct))
         .FirstOrDefault();
     if (assignment is null)
     {

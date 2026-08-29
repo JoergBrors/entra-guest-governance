@@ -1,5 +1,6 @@
 using B2B.Portal.Application.Ports;
 using B2B.Portal.Domain.Entities;
+using B2B.Portal.Domain.ValueObjects;
 using B2B.Portal.Worker.Processing;
 using Microsoft.Extensions.Logging;
 
@@ -21,8 +22,9 @@ public sealed class ReconciliationHandler(
     {
         var guestId = job.Payload.GetProperty("GuestId").GetGuid();
 
-        var desired = await assignmentRepository.ListActiveByGuestAsync(job.PlatformTenantId, guestId, ct);
-        var actual = await resourceAccessRepository.ListByGuestAsync(job.PlatformTenantId, guestId, ct);
+        var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
+        var desired = await assignmentRepository.ListActiveByGuestAsync(tenant, guestId, ct);
+        var actual = await resourceAccessRepository.ListByGuestAsync(tenant, guestId, ct);
 
         logger.LogInformation(
             "Reconciliation Guest={GuestId}: DesiredAssignments={Desired} ActualAccess={Actual} " +

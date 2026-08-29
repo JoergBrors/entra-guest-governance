@@ -22,7 +22,7 @@
       4. Mit -InitCosmosEmulator: prueft ob der Cosmos DB Emulator installiert ist, startet
          ihn bei Bedarf (ueber das mitgelieferte PowerShell-Modul) und legt die im Bicep-Modul
          (infra/modules/cosmos-free-tier.bicep) definierte Datenbank/Container-Struktur
-         (b2b-portal / domain-data / job-queue) per REST gegen den lokalen Emulator-Endpoint
+         (b2b-governance-dev / domain / discovery / jobs / audit) per REST gegen den lokalen Emulator-Endpoint
          an. Verwendet dabei ausschliesslich den oeffentlich dokumentierten Well-Known-
          Emulator-Key - kein echtes Secret. Der Connection String wird immer (auch ohne
          -InitCosmosEmulator) als Platzhalter-Struktur nach .env.local geschrieben.
@@ -470,10 +470,15 @@ if ($InitCosmosEmulator) {
                 return Invoke-RestMethod @params
             }
 
-            $databaseId = "b2b-portal"
+            # Vier logisch getrennte Container statt eines gemeinsamen "domain-data"-
+            # Containers: Desired State (domain) / Actual State (discovery) / Job-Queue
+            # (jobs) / Audit (audit) — spiegelt infra/modules/cosmos-free-tier.bicep exakt.
+            $databaseId = "b2b-governance-dev"
             $containers = @(
-                @{ id = "domain-data"; partitionKey = @{ paths = @("/platformTenantId"); kind = "Hash" } }
-                @{ id = "job-queue"; partitionKey = @{ paths = @("/platformTenantId"); kind = "Hash" }; defaultTtl = -1 }
+                @{ id = "domain"; partitionKey = @{ paths = @("/platformTenantId"); kind = "Hash" } }
+                @{ id = "discovery"; partitionKey = @{ paths = @("/platformTenantId"); kind = "Hash" } }
+                @{ id = "jobs"; partitionKey = @{ paths = @("/platformTenantId"); kind = "Hash" }; defaultTtl = -1 }
+                @{ id = "audit"; partitionKey = @{ paths = @("/platformTenantId"); kind = "Hash" }; defaultTtl = -1 }
             )
 
             try {
@@ -502,7 +507,7 @@ if ($InitCosmosEmulator) {
                         else { throw }
                     }
                 }
-                Add-Result "Cosmos DB Struktur" "OK" "Datenbank '$databaseId' + Container domain-data/job-queue vorhanden (siehe infra/modules/cosmos-free-tier.bicep)"
+                Add-Result "Cosmos DB Struktur" "OK" "Datenbank '$databaseId' + Container domain/discovery/jobs/audit vorhanden (siehe infra/modules/cosmos-free-tier.bicep)"
             }
             catch {
                 Add-Result "Cosmos DB Struktur" "FEHLER" $_.Exception.Message

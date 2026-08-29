@@ -1,6 +1,7 @@
 using B2B.Portal.Application.Ports;
 using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
+using B2B.Portal.Domain.ValueObjects;
 using B2B.Portal.Worker.Processing;
 using Microsoft.Extensions.Logging;
 
@@ -24,7 +25,8 @@ public sealed class StartReviewHandler(
         var reviewDefinitionId = job.Payload.GetProperty("ReviewDefinitionId").GetGuid();
         var guestId = job.Payload.GetProperty("GuestId").GetGuid();
 
-        var assignments = await assignmentRepository.ListActiveByGuestAsync(job.PlatformTenantId, guestId, ct);
+        var assignments = await assignmentRepository.ListActiveByGuestAsync(
+            TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), guestId, ct);
 
         var instance = new ReviewInstance
         {
@@ -68,7 +70,8 @@ public sealed class ApplyReviewDecisionHandler(
         var reviewItemId = job.Payload.GetProperty("ReviewItemId").GetGuid();
         var decision = Enum.Parse<ReviewDecision>(job.Payload.GetProperty("Decision").GetString()!);
 
-        var instance = await reviewRepository.GetAsync(job.PlatformTenantId, reviewInstanceId, ct);
+        var instance = await reviewRepository.GetAsync(
+            TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), reviewInstanceId, ct);
         var item = instance?.Items.FirstOrDefault(i => i.Id == reviewItemId);
         if (instance is null || item is null)
         {

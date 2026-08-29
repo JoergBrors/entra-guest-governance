@@ -2,6 +2,7 @@ using B2B.Portal.Application.Ports;
 using B2B.Portal.Application.Services;
 using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
+using B2B.Portal.Domain.ValueObjects;
 
 namespace B2B.Portal.Application.Commands;
 
@@ -25,7 +26,8 @@ public sealed class GrantWorkloadRoleCommandHandler(
         var hash = DesiredStateHasher.Hash(
             "GrantWorkloadRole", request.GuestId.ToString(), request.WorkloadId.ToString(), request.RoleId.ToString());
 
-        var existing = await assignmentRepository.ListActiveByGuestAsync(request.PlatformTenantId, request.GuestId, ct);
+        var tenant = TenantContext.Create(request.PlatformTenantId);
+        var existing = await assignmentRepository.ListActiveByGuestAsync(tenant, request.GuestId, ct);
         var already = existing.FirstOrDefault(a => a.WorkloadId == request.WorkloadId && a.RoleId == request.RoleId);
 
         if (already is not null)
