@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import {
-  Title2, Text, Card, Badge, Spinner, makeStyles, tokens,
+  Title2, Text, Card, Badge, Spinner, Button, makeStyles, tokens,
 } from '@fluentui/react-components';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import type { Workload } from '../types/domain';
 
@@ -19,6 +20,7 @@ const useStyles = makeStyles({
  */
 export function WorkloadsAdminPage() {
   const styles = useStyles();
+  const navigate = useNavigate();
   const [workloads, setWorkloads] = useState<Workload[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -51,6 +53,15 @@ export function WorkloadsAdminPage() {
                 </Badge>
               ))}
             </div>
+
+            <Button
+              appearance="secondary"
+              size="small"
+              style={{ marginTop: '12px' }}
+              onClick={() => navigate(`/workloads/${w.id}/scenarios`)}
+            >
+              Scenarios
+            </Button>
           </Card>
         ))}
       </div>

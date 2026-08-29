@@ -85,4 +85,5 @@ public static class JobTypes
     public const string DisableGuest = nameof(DisableGuest);
     public const string DeleteGuest = nameof(DeleteGuest);
     public const string SendNotification = nameof(SendNotification);
+    public const string DeployScenario = nameof(DeployScenario);
 }

@@ -1,13 +1,16 @@
 using B2B.Portal.Api.Tenancy;
 using B2B.Portal.Application.Commands;
 using B2B.Portal.Application.Ports;
+using B2B.Portal.Application.Scenarios;
 using B2B.Portal.Application.Services;
 using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
+using B2B.Portal.Domain.Services;
 using B2B.Portal.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Configuration.AddDotEnvLocal();
 builder.Configuration.AddEnvironmentVariables();
 
 var mode = builder.Configuration["B2B_MODE"] ?? "LOCAL_MOCK";
@@ -22,6 +25,8 @@ builder.Services.AddSingleton<LifecycleService>();
 builder.Services.AddSingleton<InviteGuestCommandHandler>();
 builder.Services.AddSingleton<GrantWorkloadRoleCommandHandler>();
 builder.Services.AddSingleton<RevokeWorkloadRoleCommandHandler>();
+builder.Services.AddSingleton<DeployScenarioCommandHandler>();
+builder.Services.AddSingleton<ScenarioImportExportService>();
 
 builder.Services.AddCors(o => o.AddDefaultPolicy(p => p
     .WithOrigins(builder.Configuration["WEB_BASE_URL"] ?? "http://localhost:5301")
@@ -122,6 +127,53 @@ app.MapPost("/api/deletion-candidates/{guestId:guid}/validate", async (
     return Results.Ok(evaluation);
 });
 
+// ---- Workload-Szenarien -----------------------------------------------------
+app.MapGet("/api/workloads/{workloadId:guid}/scenarios", async (
+    Guid workloadId, ITenantContextAccessor tenantCtx, IWorkloadScenarioRepository repo, CancellationToken ct) =>
+{
+    var scenarios = await repo.ListByWorkloadAsync(tenantCtx.Current, workloadId, ct);
+    return Results.Ok(scenarios);
+});
+
+app.MapPost("/api/scenarios/import", async (
+    ScenarioTemplateDto body, ITenantContextAccessor tenantCtx,
+    ScenarioImportExportService importExportService, CancellationToken ct) =>
+{
+    foreach (var rule in body.Rules)
+    {
+        if (rule.Condition is System.Text.Json.JsonElement condition)
+        {
+            try
+            {
+                JsonLogicEvaluator.Validate(condition);
+            }
+            catch (NotSupportedException ex)
+            {
+                return Results.BadRequest(new { error = $"Regel für Ressource '{rule.ResourceName}': {ex.Message}" });
+            }
+        }
+    }
+
+    var result = await importExportService.ImportAsync(tenantCtx.Current, body, ct);
+    return Results.Ok(result);
+});
+
+app.MapGet("/api/scenarios/{id:guid}/export", async (
+    Guid id, ITenantContextAccessor tenantCtx,
+    ScenarioImportExportService importExportService, CancellationToken ct) =>
+{
+    var template = await importExportService.ExportAsync(tenantCtx.Current, id, ct);
+    return Results.Ok(template);
+});
+
+app.MapPost("/api/scenarios/{id:guid}/deploy", async (
+    Guid id, ITenantContextAccessor tenantCtx, DeployScenarioCommandHandler handler, CancellationToken ct) =>
+{
+    var request = new DeployScenarioRequest(tenantCtx.Current.PlatformTenantId, id, Actor: "api-user");
+    var scenario = await handler.HandleAsync(request, ct);
+    return Results.Accepted(value: scenario);
+});
+
 // ---- Dev-Only Seed (nur LOCAL_MOCK) ---------------------------------------
 // Erzeugt aussagekräftige Demo-/Mockdaten: einen Workload mit mehreren Rollen und eine
 // konfigurierbare Anzahl Gäste inkl. Assignments, direkt über die vorhandenen Repositories
@@ -194,6 +246,13 @@ public sealed record InviteGuestBody(string Mail, string DisplayName, string? Di
 public sealed record AssignmentBody(Guid GuestId, Guid RoleId);
 public sealed record DeletionValidationBody(bool GracePeriodReached);
 public sealed record SeedLargeWorkloadBody(int? GuestCount, string? WorkloadName);
+public sealed record ScenarioConditionBody(string Name, System.Text.Json.JsonElement Expression);
+public sealed record WorkloadScenarioBody(
+    string Name,
+    Guid ExternalOrganizationId,
+    string Environment,
+    List<Guid> ResourceIds,
+    List<ScenarioConditionBody> Conditions);
 
 /// <summary>
 /// Deterministische, aussagekräftige Demo-Daten für den Dev-Seed-Endpoint

@@ -1,5 +1,6 @@
 import type {
   GuestAccount, Workload, ReviewInstance, AuditEvent, DeletionGateEvaluation,
+  WorkloadScenario, ScenarioTemplateDto, ScenarioImportResult,
 } from '../types/domain';
 
 // API_BASE_URL und der Platform-Tenant kommen aus Vite-Env-Variablen (siehe .env.example
@@ -65,4 +66,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ gracePeriodReached }),
     }),
+
+  listScenarios: (workloadId: string) =>
+    request<WorkloadScenario[]>(`/api/workloads/${workloadId}/scenarios`),
+
+  deployScenario: (scenarioId: string) =>
+    request<WorkloadScenario>(`/api/scenarios/${scenarioId}/deploy`, { method: 'POST' }),
+
+  importScenarios: (template: ScenarioTemplateDto) =>
+    request<ScenarioImportResult>('/api/scenarios/import', {
+      method: 'POST',
+      body: JSON.stringify(template),
+    }),
+
+  exportScenario: (scenarioId: string) =>
+    request<ScenarioTemplateDto>(`/api/scenarios/${scenarioId}/export`),
 };

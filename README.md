@@ -48,13 +48,35 @@ docs/architecture/             Implementierungsplan, MVP-Test-Report
 
 | Modus | Zweck |
 | --- | --- |
-| `LOCAL_MOCK` | Default. UI + API + Worker lokal, Mock Directory/Mail/Queue/Data. Keine externen Schreibzugriffe. |
+| `LOCAL_MOCK` | Default. UI + API + Worker lokal, Mock Directory/Mail. Datenhaltung läuft standardmäßig gegen den lokalen Cosmos DB Emulator (siehe unten) — keine externen Schreibzugriffe zu echten Entra-/Mail-Systemen. |
 | `DEV_INTEGRATION` | Gezielte Integrationstests gegen einen dedizierten Entra Dev-Tenant + Shared Mailbox. |
 | `AZURE_DEV` | End-to-End-Abnahme in Azure Dev/PoC. |
 
 Konfiguration erfolgt über `.env.local` (siehe `.env.example`). Es werden **keine** realen
 Tenant-IDs, Secrets, Group-IDs oder Mailboxen im Repository hinterlegt (siehe Blueprint,
 "Nicht festgelegt").
+
+### Datenhaltung in LOCAL_MOCK: Cosmos DB Emulator als Default
+
+`DATA_PROVIDER` steuert die Repository-Implementierung und ist unter `LOCAL_MOCK`
+standardmäßig **`cosmos`** — API und Worker schreiben/lesen also bereits lokal gegen den
+Cosmos DB Emulator (Datenbank `b2b-governance-dev`, Container `domain`/`discovery`/
+`jobs`/`audit`, siehe `infra/modules/cosmos-free-tier.bicep`), nicht nur gegen InMemory.
+Das gilt auch für Bulk-Läufe wie `scripts/seed-large-workload.ps1`.
+
+Voraussetzung: der Emulator muss laufen —
+
+```powershell
+./scripts/requirements.ps1 -InitCosmosEmulator
+```
+
+`API_BASE_URL`/`COSMOS_EMULATOR_ENDPOINT`/`COSMOS_EMULATOR_KEY`/`COSMOS_DATABASE_ID` werden
+dabei nach `.env.local` geschrieben und von `B2B.Portal.Api`/`B2B.Portal.Worker` automatisch
+geladen (auch bei einfachem `dotnet run`, nicht nur über den VS-Code-Debugger — siehe
+`DotEnvLoader` in `src/B2B.Portal.Infrastructure`).
+
+Ohne laufenden Emulator schlägt der Start fehl. Um stattdessen ohne Emulator gegen
+InMemory-Repositories zu arbeiten, `DATA_PROVIDER=local` explizit in `.env.local` setzen.
 
 ## Quick Start
 

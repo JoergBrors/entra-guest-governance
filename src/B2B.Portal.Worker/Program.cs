@@ -12,6 +12,7 @@ using B2B.Portal.Worker.Processing;
 
 var builder = Host.CreateApplicationBuilder(args);
 
+builder.Configuration.AddDotEnvLocal();
 builder.Configuration.AddEnvironmentVariables();
 
 var mode = builder.Configuration["B2B_MODE"] ?? "LOCAL_MOCK";
@@ -33,6 +34,7 @@ builder.Services.AddSingleton<IJobHandler, InvitationHandler>();
 builder.Services.AddSingleton<IJobHandler, ResendInvitationHandler>();
 builder.Services.AddSingleton<IJobHandler, GrantWorkloadRoleHandler>();
 builder.Services.AddSingleton<IJobHandler, RevokeWorkloadRoleHandler>();
+builder.Services.AddSingleton<IJobHandler, DeployScenarioHandler>();
 builder.Services.AddSingleton<IJobHandler, DiscoveryHandler>();
 builder.Services.AddSingleton<IJobHandler, ReconciliationHandler>();
 builder.Services.AddSingleton<IJobHandler, StartReviewHandler>();

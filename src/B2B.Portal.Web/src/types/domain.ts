@@ -87,3 +87,47 @@ export interface DeletionGateEvaluation {
   result: DeletionGateResult;
   blockers: string[];
 }
+
+// Eine ScenarioResourceRule bindet genau eine WorkloadResource an ein freies Set
+// fachlicher Schlüssel (z.B. Firma, Rolle) und eine optionale Bedingung — die Bedingung
+// gilt nur für diese eine Regel, nicht für das ganze Szenario. Siehe
+// B2B.Portal.Domain.Entities.ScenarioResourceRule.
+export interface ScenarioResourceRule {
+  id: string;
+  workloadScenarioId: string;
+  resourceId: string;
+  fields: Record<string, string>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  condition?: any | null; // rohes JSONLogic-Dokument, siehe JsonLogicEvaluator (Backend)
+}
+
+export interface WorkloadScenario {
+  id: string;
+  platformTenantId: string;
+  workloadId: string;
+  name: string;
+  rules: ScenarioResourceRule[];
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScenarioTemplateRuleDto {
+  resourceName: string;
+  resourceType: string;
+  fields: Record<string, string>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  condition?: any | null;
+}
+
+export interface ScenarioTemplateDto {
+  workloadName: string;
+  scenarioName: string;
+  rules: ScenarioTemplateRuleDto[];
+}
+
+export interface ScenarioImportResult {
+  scenarioId: string | null;
+  createdResourceNames: string[];
+  errors: string[];
+}

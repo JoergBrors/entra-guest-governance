@@ -106,3 +106,19 @@ public interface IResourceAccessRepository
         TenantContext tenant, Guid guestId, CancellationToken ct);
     Task UpsertAsync(ResourceAccess access, CancellationToken ct);
 }
+
+public interface IWorkloadScenarioRepository
+{
+    Task<WorkloadScenario?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
+    Task<IReadOnlyList<WorkloadScenario>> ListByWorkloadAsync(
+        TenantContext tenant, Guid workloadId, CancellationToken ct);
+    Task UpsertAsync(WorkloadScenario scenario, CancellationToken ct);
+}
+
+public interface IExternalOrganizationRepository
+{
+    Task<ExternalOrganization?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
+    Task<ExternalOrganization?> GetByNameAsync(TenantContext tenant, string name, CancellationToken ct);
+    Task<IReadOnlyList<ExternalOrganization>> ListAsync(TenantContext tenant, CancellationToken ct);
+    Task UpsertAsync(ExternalOrganization organization, CancellationToken ct);
+}

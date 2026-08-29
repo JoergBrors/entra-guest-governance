@@ -147,12 +147,12 @@ automatisiert herstellen".
 1. Tenant-Kontext im MVP ist header-basiert, nicht token-validiert — nicht für
    produktiven Einsatz geeignet, nur für LOCAL_MOCK/Entwicklung.
 2. Keine Rate-Limit-/Retry-Feinsteuerung für den (noch nicht implementierten) Graph-Adapter.
-3. Kein persistenter Speicher (nur InMemory) — Neustart des Prozesses verliert alle Daten;
-   Cosmos-Adapter ist vorbereitet (Bicep-Modul vorhanden), aber nicht angebunden. **Zusätzlich
-   bestätigt (Abschnitt 2.4):** API und Worker sind getrennte Prozesse mit jeweils eigenem
-   In-Memory-Zustand — ein von der API enqueued Job ist für den separat laufenden Worker
-   nicht sichtbar. Ohne Cosmos-Adapter funktioniert der Job-Fluss nur innerhalb eines
-   einzigen Prozesses (z. B. in Integrationstests über `WebApplicationFactory`).
+3. **Behoben (29. August 2026, siehe `docs/prompts/09-cosmos-migration-and-default.md`):**
+   Cosmos-Adapter ist jetzt
+   implementiert und unter `LOCAL_MOCK` sogar Default (`DATA_PROVIDER=cosmos`) — API und
+   Worker teilen sich damit persistenten, prozessübergreifenden Zustand über den lokalen
+   Cosmos DB Emulator. `DATA_PROVIDER=local` bleibt als expliziter Opt-out auf InMemory
+   verfügbar (z. B. ohne installierten Emulator).
 4. Kein dedizierter API-Command für Workload-Erstellung im MVP (nur Guest-Invite,
    Assignment-Grant/Revoke, Deletion-Validate) — Workloads aktuell nur über das Repository
    direkt anlegbar, nicht über die API.

@@ -153,6 +153,53 @@ public sealed class InMemoryResourceAccessRepository : IResourceAccessRepository
     }
 }
 
+public sealed class InMemoryWorkloadScenarioRepository : IWorkloadScenarioRepository
+{
+    private readonly ConcurrentDictionary<Guid, WorkloadScenario> _store = new();
+
+    public Task<WorkloadScenario?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct)
+    {
+        _store.TryGetValue(id, out var s);
+        return Task.FromResult(s is not null && tenant.Owns(s.PlatformTenantId) ? s : null);
+    }
+
+    public Task<IReadOnlyList<WorkloadScenario>> ListByWorkloadAsync(
+        TenantContext tenant, Guid workloadId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<WorkloadScenario>>(
+            _store.Values.Where(s => tenant.Owns(s.PlatformTenantId) && s.WorkloadId == workloadId).ToList());
+
+    public Task UpsertAsync(WorkloadScenario scenario, CancellationToken ct)
+    {
+        _store[scenario.Id] = scenario;
+        return Task.CompletedTask;
+    }
+}
+
+public sealed class InMemoryExternalOrganizationRepository : IExternalOrganizationRepository
+{
+    private readonly ConcurrentDictionary<Guid, ExternalOrganization> _store = new();
+
+    public Task<ExternalOrganization?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct)
+    {
+        _store.TryGetValue(id, out var o);
+        return Task.FromResult(o is not null && tenant.Owns(o.PlatformTenantId) ? o : null);
+    }
+
+    public Task<ExternalOrganization?> GetByNameAsync(TenantContext tenant, string name, CancellationToken ct) =>
+        Task.FromResult(_store.Values.FirstOrDefault(
+            o => tenant.Owns(o.PlatformTenantId) && string.Equals(o.Name, name, StringComparison.OrdinalIgnoreCase)));
+
+    public Task<IReadOnlyList<ExternalOrganization>> ListAsync(TenantContext tenant, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<ExternalOrganization>>(
+            _store.Values.Where(o => tenant.Owns(o.PlatformTenantId)).ToList());
+
+    public Task UpsertAsync(ExternalOrganization organization, CancellationToken ct)
+    {
+        _store[organization.Id] = organization;
+        return Task.CompletedTask;
+    }
+}
+
 /// <summary>In-Memory AuditWriter — Audit Events sind tenantgebunden und werden gefiltert.</summary>
 public sealed class InMemoryAuditWriter : IAuditWriter
 {
