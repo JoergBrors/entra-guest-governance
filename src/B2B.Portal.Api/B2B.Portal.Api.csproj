@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <UserSecretsId>b2b-portal-api</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\B2B.Portal.Domain\B2B.Portal.Domain.csproj" />
+    <ProjectReference Include="..\B2B.Portal.Application\B2B.Portal.Application.csproj" />
+    <ProjectReference Include="..\B2B.Portal.Infrastructure\B2B.Portal.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,23 @@
+root = true
+
+[*]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.cs]
+indent_size = 4
+csharp_new_line_before_open_brace = all
+dotnet_sort_system_directives_first = true
+dotnet_style_require_accessibility_modifiers = always:warning
+csharp_style_var_for_built_in_types = true:suggestion
+dotnet_diagnostic.CA1014.severity = none
+
+[*.{ts,tsx,js,jsx}]
+indent_size = 2
+
+[*.{json,bicep,yml,yaml}]
+indent_size = 2

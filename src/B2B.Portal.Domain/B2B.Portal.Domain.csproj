@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Architekturregel (Blueprint Abschnitt 3 / Anhang A):
+    Domain referenziert keine Azure-, Graph- oder UI-Pakete.
+    Dieses Projekt darf KEINE PackageReference auf Microsoft.Graph,
+    Azure.* oder Infrastructure/Api/Worker enthalten.
+    Wird von B2B.Portal.Architecture.Tests erzwungen.
+  -->
+</Project>

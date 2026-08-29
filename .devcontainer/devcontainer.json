@@ -1,0 +1,18 @@
+{
+  "name": "b2b-guest-governance",
+  "image": "mcr.microsoft.com/devcontainers/dotnet:1-10.0",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-dotnettools.csdevkit",
+        "dbaeumer.vscode-eslint",
+        "ms-azuretools.vscode-bicep"
+      ]
+    }
+  },
+  "postCreateCommand": "dotnet restore && npm ci --prefix src/B2B.Portal.Web",
+  "remoteEnv": { "B2B_MODE": "LOCAL_MOCK" }
+}

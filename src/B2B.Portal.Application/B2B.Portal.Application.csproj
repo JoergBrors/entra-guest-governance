@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\B2B.Portal.Domain\B2B.Portal.Domain.csproj" />
+  </ItemGroup>
+
+  <!--
+    Application referenziert Domain und definiert Ports/Interfaces für technische Adapter.
+    Keine direkten Graph-/Azure-Pakete hier — das ist Aufgabe von Infrastructure.
+  -->
+
+</Project>

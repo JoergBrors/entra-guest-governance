@@ -1,0 +1,45 @@
+using B2B.Portal.Domain.Enums;
+
+namespace B2B.Portal.Domain.Entities;
+
+/// <summary>
+/// Review-Regel (Blueprint 13). Provider=Auto lässt den Capability Resolver entscheiden,
+/// ob der interne oder ein nativer Entra-Provider verwendet wird.
+/// </summary>
+public sealed class ReviewDefinition
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public required string PlatformTenantId { get; init; }
+    public required string Scope { get; set; } // z.B. WorkloadId oder "guest-account"
+    public GovernanceProvider Provider { get; set; } = GovernanceProvider.Auto;
+    public string? Reviewer { get; set; }
+    public bool Active { get; set; } = true;
+}
+
+/// <summary>
+/// Laufende Review-Instanz mit Snapshot der zu prüfenden Assignments (Blueprint 13.2).
+/// Ein laufender ReviewInstance wechselt seinen Provider nicht (Anhang A, Regel 11).
+/// </summary>
+public sealed class ReviewInstance
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public required string PlatformTenantId { get; init; }
+    public required Guid ReviewDefinitionId { get; init; }
+    public required GovernanceProvider Provider { get; init; }
+    public DateTimeOffset StartedAt { get; init; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? CompletedAt { get; set; }
+    public List<ReviewItem> Items { get; init; } = new();
+
+    public bool IsOpen => CompletedAt is null;
+}
+
+/// <summary>Einzelne Prüf-/Entscheidungseinheit innerhalb einer ReviewInstance.</summary>
+public sealed class ReviewItem
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public required Guid ReviewInstanceId { get; init; }
+    public required Guid AssignmentId { get; init; }
+    public ReviewDecision Decision { get; set; } = ReviewDecision.Pending;
+    public string? DecidedBy { get; set; }
+    public DateTimeOffset? DecidedAt { get; set; }
+}

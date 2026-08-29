@@ -1,0 +1,40 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Portal API",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "dotnet: build",
+      "program": "${workspaceFolder}/src/B2B.Portal.Api/bin/Debug/net10.0/B2B.Portal.Api.dll",
+      "cwd": "${workspaceFolder}/src/B2B.Portal.Api",
+      "env": { "B2B_MODE": "LOCAL_MOCK", "ASPNETCORE_URLS": "http://localhost:5000" },
+      "envFile": "${workspaceFolder}/.env.local",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Worker Host",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "dotnet: build",
+      "program": "${workspaceFolder}/src/B2B.Portal.Worker/bin/Debug/net10.0/B2B.Portal.Worker.dll",
+      "cwd": "${workspaceFolder}/src/B2B.Portal.Worker",
+      "env": { "B2B_MODE": "LOCAL_MOCK" },
+      "envFile": "${workspaceFolder}/.env.local",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Web UI (npm dev)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run dev",
+      "cwd": "${workspaceFolder}/src/B2B.Portal.Web"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "LOCAL_MOCK: API + Worker + Web",
+      "configurations": ["Portal API", "Worker Host", "Web UI (npm dev)"]
+    }
+  ]
+}

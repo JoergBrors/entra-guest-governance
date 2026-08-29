@@ -1,0 +1,10 @@
+{
+  "dotnet.defaultSolution": "b2b-guest-governance.sln",
+  "editor.formatOnSave": true,
+  "files.exclude": {
+    "**/bin": true,
+    "**/obj": true,
+    "**/node_modules": true
+  },
+  "typescript.tsdk": "src/B2B.Portal.Web/node_modules/typescript/lib"
+}

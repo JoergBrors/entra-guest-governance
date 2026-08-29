@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\B2B.Portal.Domain\B2B.Portal.Domain.csproj" />
+    <ProjectReference Include="..\B2B.Portal.Application\B2B.Portal.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Microsoft.Graph wird bewusst NICHT eingebunden, solange kein Dev-Tenant für
+      DEV_INTEGRATION vorbereitet ist (siehe "Keine unbekannten IDs erfinden").
+      GraphSharedMailboxEmailProvider ist als Adapterschale vorbereitet und referenziert
+      nur Konfigurationswerte; das tatsächliche SDK-Paket wird ergänzt, sobald ein
+      Dev App Registration existiert (siehe docs/architecture/mvp-test-report.md).
+    -->
+  </ItemGroup>
+
+</Project>

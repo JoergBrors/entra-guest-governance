@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="NetArchTest.Rules" Version="1.3.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\B2B.Portal.Domain\B2B.Portal.Domain.csproj" />
+    <ProjectReference Include="..\..\src\B2B.Portal.Application\B2B.Portal.Application.csproj" />
+    <ProjectReference Include="..\..\src\B2B.Portal.Infrastructure\B2B.Portal.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

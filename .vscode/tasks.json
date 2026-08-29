@@ -1,0 +1,44 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "dotnet: restore",
+      "type": "shell",
+      "command": "dotnet restore",
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "dotnet: build",
+      "type": "shell",
+      "command": "dotnet build -c Debug",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "dotnet: test",
+      "type": "shell",
+      "command": "dotnet test -c Debug",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "web: install",
+      "type": "shell",
+      "command": "npm ci",
+      "options": { "cwd": "${workspaceFolder}/src/B2B.Portal.Web" }
+    },
+    {
+      "label": "web: build",
+      "type": "shell",
+      "command": "npm run build",
+      "options": { "cwd": "${workspaceFolder}/src/B2B.Portal.Web" }
+    },
+    {
+      "label": "web: dev",
+      "type": "shell",
+      "command": "npm run dev",
+      "isBackground": true,
+      "options": { "cwd": "${workspaceFolder}/src/B2B.Portal.Web" }
+    }
+  ]
+}
