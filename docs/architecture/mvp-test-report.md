@@ -1,6 +1,6 @@
 # MVP-Test-Report — B2B Guest Governance Portal
 
-Erstellt gemäß `prompts/02-test-mvp.md` ("MVP Verification"), aktualisiert im Rahmen der
+Erstellt gemäß `docs/prompts-original/02-test-mvp.md` ("MVP Verification"), aktualisiert im Rahmen der
 Vollständigkeitsprüfung vom 29. August 2026 (siehe `docs/prompts/03-completeness-check.md`).
 
 - **Datum:** 29. August 2026 (ursprünglicher Entwurf: 28. August 2026)
@@ -106,7 +106,7 @@ Nach diesen vier minimalen Änderungen: `dotnet build` 0 Fehler/0 Warnungen,
 
 **Legende:** ✅ verifiziert (Test grün oder Build+Codelesung) · ⚠️ offen · ❌ fehlt
 
-Nicht in dieser Runde ausgeführt (siehe `prompts/02-test-mvp.md` Punkte 5/6/12): API/Worker
+Nicht in dieser Runde ausgeführt (siehe `docs/prompts-original/02-test-mvp.md` Punkte 5/6/12): API/Worker
 in `LOCAL_MOCK` tatsächlich hochfahren und Jobs Ende-zu-Ende durch die Mock-Adapter
 schicken. Die Unit-/Integrationstests decken die einzelnen Bausteine ab, ein manueller
 End-to-End-Lauf über echte HTTP-Requests gegen eine laufende Instanz steht noch aus.

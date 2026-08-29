@@ -1,7 +1,7 @@
 # Prompt 01 — Bootstrap MVP
 
 - **Datum:** 28. August 2026
-- **Auftrag:** `prompts/01-bootstrap-mvp.md` ("Development Foundation und MVP")
+- **Auftrag:** [`prompts-original/01-bootstrap-mvp.md`](../prompts-original/01-bootstrap-mvp.md) ("Development Foundation und MVP")
 - **Ausführungsumgebung:** Sandbox ohne Netzwerkzugriff auf .NET-SDK-Download-Quellen
   (kein `dotnet` CLI verfügbar); Node/npm verfügbar.
 

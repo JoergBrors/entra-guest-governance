@@ -1,6 +1,6 @@
 # Development-Plan — B2B Guest Governance Portal
 
-Erstellt gemäß Codex-Bootstrap-Prompt (`prompts/01-bootstrap-mvp.md`), Schritt 2
+Erstellt gemäß Codex-Bootstrap-Prompt (`docs/prompts-original/01-bootstrap-mvp.md`), Schritt 2
 ("Erstelle einen kurzen Implementierungsplan").
 
 ## 1. Ausgangslage
@@ -49,15 +49,25 @@ damit jede Schicht nur auf die darunterliegende referenziert (siehe Blueprint Ab
 - Review-Zuweisung an Reviewer sowie Workload-Template-Provisionierung sind im Domain-
   Modell vorbereitet, aber im MVP-Command-Set noch nicht vollständig verdrahtet.
 
-## 4. Bekannte nächste Schritte (vor Pilotbetrieb)
+## 4. Stand nach Abschluss des initialen 5-Phasen-Plans (siehe `docs/prompts/`)
+
+Der ursprüngliche Plan (Cosmos-Migration → Workload-Szenarien/JSONLogic → Szenario-GUI →
+Excel-Import-Backend → Excel-Import-GUI) ist vollständig umgesetzt — siehe
+`docs/prompts/09-cosmos-migration-and-default.md` bis `docs/prompts/14-guest-excel-import.md`
+für die Einzelschritte. Ergänzend wurden Workload-/Szenario-Editier- und Löschfunktionen
+(inkl. Konsistenzprüfungen), Nutzerzahlen-Anzeige und Cross-Workload-Reviews nachgezogen
+(siehe `docs/prompts/11` bis `13`). Damit sind aus Punkt 3 (Cosmos-Adapter) und größtenteils
+aus Punkt 4 (Web-UI für Reviews/Assignments) der ursprünglichen Liste erledigt.
+
+## 5. Bekannte nächste Schritte (vor Pilotbetrieb)
 
 1. Echte Token-Validierung (Microsoft.Identity.Web) statt Header-basiertem Tenant-Kontext.
 2. Microsoft.Graph SDK einbinden, sobald eine Dev App Registration mit
    `Mail.Send`/`User.Invite.All`/`Group.ReadWrite.All`-Rechten vorliegt (DEV_INTEGRATION).
-3. Cosmos DB Adapter für Repositories (aktuell InMemory) gemäß `infra/modules/cosmos-free-tier.bicep`.
-4. Web-UI: Review-Entscheidungen (Keep/Remove) und Assignment-Erstellung aus der
-   Workloads-Admin-Ansicht heraus (aktuell nur über die API direkt möglich).
-5. Exception-Middleware für konsistente 401/403-Antworten (aktuell wirft
+3. Web-UI: Review-Entscheidungen (Keep/Remove) direkt aus der `ReviewsPage` heraus (aktuell
+   nur Anzeige; die Entscheidung selbst läuft über den Worker-Job `ApplyReviewDecision`,
+   noch nicht über einen eigenen API-Endpoint aus der UI ausgelöst).
+4. Exception-Middleware für konsistente 401/403-Antworten (aktuell wirft
    `ITenantContextAccessor` bei fehlendem Header eine Exception, die als 500 sichtbar wird).
 
 Siehe auch `docs/architecture/mvp-test-report.md` für den aktuellen Verifikationsstatus.

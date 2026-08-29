@@ -1,7 +1,7 @@
 # Prompt 02 — MVP Verification
 
 - **Datum:** 28. August 2026
-- **Auftrag:** `prompts/02-test-mvp.md` ("MVP Verification")
+- **Auftrag:** [`prompts-original/02-test-mvp.md`](../prompts-original/02-test-mvp.md) ("MVP Verification")
 - **Ausführungsumgebung:** dieselbe Sandbox wie Prompt 01, weiterhin ohne `dotnet` CLI.
 
 ## Was beauftragt wurde
