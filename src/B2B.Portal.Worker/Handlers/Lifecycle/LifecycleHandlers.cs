@@ -14,7 +14,7 @@ namespace B2B.Portal.Worker.Handlers.Lifecycle;
 /// vorbehalten, die ihrerseits nur nach einer "Ready"-Evaluation aufgerufen werden dürfen.
 /// </summary>
 public sealed class ValidateDeletionHandler(
-    LifecycleService lifecycleService, IJobRepository jobRepository, ILogger<ValidateDeletionHandler> logger)
+    LifecycleService lifecycleService, ILogger<ValidateDeletionHandler> logger)
     : IJobHandler
 {
     public string JobType => JobTypes.ValidateDeletion;

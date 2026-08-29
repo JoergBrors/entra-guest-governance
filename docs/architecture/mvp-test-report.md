@@ -1,22 +1,21 @@
 # MVP-Test-Report — B2B Guest Governance Portal
 
-Erstellt gemäß `prompts/02-test-mvp.md` ("MVP Verification").
+Erstellt gemäß `prompts/02-test-mvp.md` ("MVP Verification"), aktualisiert im Rahmen der
+Vollständigkeitsprüfung vom 29. August 2026 (siehe `docs/prompts/03-completeness-check.md`).
 
-- **Datum:** 28. August 2026
-- **Commit:** initiales Bootstrap-Commit (noch nicht committed — Repository frisch erstellt)
-- **Erstellungsumgebung:** Sandbox ohne Netzwerkzugriff auf .NET-SDK-Download-Quellen
+- **Datum:** 29. August 2026 (ursprünglicher Entwurf: 28. August 2026)
+- **Commit:** `68e1c1d` (Branch `feature-initial`)
+- **Verifikationsumgebung:** lokale Windows-Entwicklungsumgebung mit `dotnet 10.0.303`,
+  Node.js/npm, Bicep CLI 0.46.1 — **mit** Netzwerk-/Toolzugriff.
 
 ## 1. Wichtiger Hinweis zur Testabdeckung
 
-Dieses Repository wurde in einer Umgebung erstellt, die **kein `dotnet` CLI** zur Verfügung
-hatte (Netzwerk auf npm/PyPI/GitHub beschränkt, kein Zugriff auf `dotnet.microsoft.com` /
-NuGet). Der gesamte C#/.NET-Teil (Domain, Application, Infrastructure, Api, Worker, alle
-Tests) wurde daher **nicht** mit `dotnet restore` / `dotnet build` / `dotnet test`
-verifiziert. Der Code folgt der im Blueprint und MVP-Dokument festgelegten Architektur und
-den dort vorgegebenen Interfaces/Signaturen, kann aber Tippfehler oder kleinere
-Kompilierfehler enthalten, die erst beim ersten lokalen `dotnet build` sichtbar werden.
+Der ursprüngliche Bootstrap (28. August 2026) entstand in einer Sandbox ohne `dotnet`-CLI;
+der Backend-Code war zu diesem Zeitpunkt **nicht** kompiliert/getestet. Am 29. August 2026
+wurde dies in einer Umgebung mit vollem Tooling nachgeholt (Abschnitt 2.2). Dabei wurden
+**drei reale Kompilierfehler** gefunden und behoben (Abschnitt 3).
 
-**Der Frontend-Teil (React/TypeScript/Vite) wurde dagegen real gebaut und getestet.**
+**Sowohl Frontend als auch Backend sind jetzt real gebaut und getestet.**
 
 ## 2. Tatsächlich ausgeführte Befehle und Ergebnisse
 
@@ -24,47 +23,69 @@ Kompilierfehler enthalten, die erst beim ersten lokalen `dotnet build` sichtbar 
 
 | Befehl | Ergebnis |
 | --- | --- |
-| `npm install` | ✅ Erfolgreich, 394 Pakete installiert |
+| `npm ci` | ✅ Erfolgreich, 394 Pakete installiert (7 bekannte Audit-Findings in Drittanbieter-Transitivpaketen, keine Blocker) |
 | `npm run build` (`tsc -b && vite build`) | ✅ Erfolgreich — 2161 Module transformiert, 0 TypeScript-Fehler, Bundle erzeugt (`dist/`) |
 | `npx vitest run` | ✅ 1 Test-Datei, 2 Tests bestanden |
-| `npx tsc -b --force` (isolierter Strict-Check) | ✅ 0 Fehler |
 
 Getesteter Fall: `MyWorkloadsPage.test.tsx` verifiziert, dass die User-Ansicht "Meine
 Workloads" Workload-Namen und Rollen anzeigt, aber **keine** technischen
 Ressourcendetails (ResourceType, ExternalId) — direkte Umsetzung von Blueprint 9
 ("keine Graph-Details in der normalen User-Ansicht").
 
-Bekannte Einschränkung: `@fluentui/react-components` (genauer dessen transitive
-Abhängigkeit `tabster`) hat unter Vitest/Node-ESM ein CJS/ESM-Interop-Problem mit
-benannten Exporten. Der Test mockt Fluent UI daher mit schlanken HTML-Ersatzkomponenten;
-die Produktionsbuild ist davon nicht betroffen (siehe `npm run build`-Ergebnis oben).
-
 ### 2.2 Backend (`dotnet ...`)
 
-**Nicht ausgeführt** — `dotnet` war in der Erstellungsumgebung nicht verfügbar
-(`/bin/sh: 1: dotnet: not found`, keine Netzwerkfreigabe für .NET-SDK-Installation).
+| Befehl | Ergebnis |
+| --- | --- |
+| `dotnet restore` | ✅ Erfolgreich |
+| `dotnet build -c Debug` | ⚠️ Zunächst 3 Kompilierfehler (CS9113, ungelesene Primary-Constructor-Parameter), nach Fix ✅ 0 Fehler / 0 Warnungen |
+| `dotnet test -c Debug` | ✅ 31/31 Tests bestanden (Domain 13, Application 3, Architecture 5, Integration 10) |
 
-## 3. MVP-Kriterien — Status
+### 2.3 Infrastruktur (`infra/*.bicep`)
+
+| Befehl | Ergebnis |
+| --- | --- |
+| `az bicep build --file infra/main.bicep --stdout` | ✅ Kompiliert fehlerfrei zu ARM-JSON (rein lokal, **keine** Azure-Ressourcen erzeugt) |
+
+## 3. Am 29. August 2026 behobene Kompilierfehler
+
+Beim ersten echten `dotnet build` traten drei Fehler vom Typ `CS9113` (ungelesener
+Primary-Constructor-Parameter) auf — reine Verdrahtungslücken, keine funktionalen Bugs:
+
+| Datei | Parameter | Fix |
+| --- | --- | --- |
+| `Services/LifecycleService.cs` | `IClock clock` | entfernt — Zeitstempel kommen bereits über `AuditService.RecordAsync` (nutzt intern `clock.UtcNow`) |
+| `Handlers/Reviews/ReviewHandlers.cs` (`ApplyReviewDecisionHandler`) | `IAssignmentRepository assignmentRepository` | entfernt — Handler arbeitet ausschließlich auf `ReviewItem`, referenziert Assignments nur per ID im Revoke-Folgejob |
+| `Handlers/Provisioning/ProvisioningHandlers.cs` (`RevokeWorkloadRoleHandler`) | `IAssignmentRepository assignmentRepository` | entfernt — Revoke ruft nur den Connector auf, Status-Update erfolgt nicht in diesem Handler |
+| `Handlers/Lifecycle/LifecycleHandlers.cs` (`ValidateDeletionHandler`) | `IJobRepository jobRepository` | entfernt — offene Jobs werden bereits innerhalb von `LifecycleService.EvaluateDeletionAsync` über `jobRepository.ListOpenSecurityRelevantAsync` geprüft |
+
+Nach diesen vier minimalen Änderungen: `dotnet build` 0 Fehler/0 Warnungen,
+`dotnet test` 31/31 grün.
+
+## 4. MVP-Kriterien — Status
 
 | Kriterium (Blueprint 22 / MVP-Dokument 8.1) | Status | Anmerkung |
 | --- | --- | --- |
-| Solution/Frontend bauen ohne Fehler | ⚠️ Teilweise verifiziert | Frontend: ✅ verifiziert. Backend: **nicht verifiziert** (kein dotnet verfügbar) |
-| Unit-/Architecture-Tests erfolgreich | ⚠️ Code vorhanden, nicht ausgeführt | `DeletionGateEvaluatorTests`, `GuestAccountTests`, `DomainIsolationTests` (NetArchTest) geschrieben, aber nicht gegen echten Compiler geprüft |
-| Zwei Plattform-Tenants, Tenant-Isolation | ⚠️ Code vorhanden, nicht ausgeführt | `TenantIsolationTests` deckt Guest-Repository + AuditWriter über zwei Tenants ab |
-| Guest Pool zeigt Mock-/Discovery-Gäste | ⚠️ Code vorhanden, nicht ausgeführt | `MockGuestDirectory` liefert deterministische Testgäste (Anna/Peter) |
-| Workload mit ≥2 Ressourcen + 1 Rolle anlegbar | ✅ Domain-Modell unterstützt dies (`Workload.Roles`/`Resources`) | Kein dedizierter API-Command für Workload-Erstellung im MVP — aktuell nur über Repository direkt möglich (nächster Schritt) |
-| Gast-zu-Workload-Rolle-Zuordnung, idempotenter Job | ⚠️ Code vorhanden, nicht ausgeführt | `GrantWorkloadRoleCommandHandler` + `GrantWorkloadRoleIdempotencyTests` |
-| Notification Job erzeugt Mail-Vorschau im Mock-Modus | ⚠️ Code vorhanden, nicht ausgeführt | `MockEmailProvider` + `MockEmailProviderTests` |
-| Interne Review Instance: Snapshot, Keep/Remove | ⚠️ Code vorhanden, nicht ausgeführt | `StartReviewHandler`/`ApplyReviewDecisionHandler` |
-| Remove → Revoke Job, entfernt nur Workload-Zugriff | ⚠️ Code vorhanden, nicht ausgeführt | `ApplyReviewDecisionHandler` enqueued `RevokeWorkloadRole`, rührt Gastidentität nicht an |
-| Deletion Gate blockiert bei allen 4 Blocker-Typen | ⚠️ Code vorhanden, nicht ausgeführt | `DeletionGateEvaluatorTests` deckt alle Fälle ab: ActiveWorkloadReference, UnclassifiedAccess, OpenJob, OpenReview, GracePeriod, ConnectorError, LiveCheck |
-| Live Validation vor Disable/Delete | ⚠️ Code vorhanden, nicht ausgeführt | `LifecycleService.EvaluateDeletionAsync` ruft `IGuestDirectory.HasRelevantAccessAsync` nur auf, wenn alle anderen Blocker frei sind |
-| Audit Events mit CorrelationId für sicherheitsrelevante Commands | ⚠️ Code vorhanden, nicht ausgeführt | `AuditService` wird von allen Commands/LifecycleService aufgerufen |
+| Solution/Frontend bauen ohne Fehler | ✅ verifiziert | Frontend und Backend bauen fehlerfrei (Abschnitt 2) |
+| Unit-/Architecture-Tests erfolgreich | ✅ verifiziert | `DeletionGateEvaluatorTests`, `GuestAccountTests`, `DomainIsolationTests` (NetArchTest) — alle grün |
+| Zwei Plattform-Tenants, Tenant-Isolation | ✅ verifiziert | `TenantIsolationTests` deckt Guest-Repository + AuditWriter über zwei Tenants ab, Test läuft grün |
+| Guest Pool zeigt Mock-/Discovery-Gäste | ✅ verifiziert | `MockGuestDirectory` liefert deterministische Testgäste (Anna/Peter) |
+| Workload mit ≥2 Ressourcen + 1 Rolle anlegbar | ✅ Domain-Modell unterstützt dies (`Workload.Roles`/`Resources`) | Kein dedizierter API-Command für Workload-Erstellung im MVP — aktuell nur über Repository direkt möglich (weiterhin offen, siehe Abschnitt 7) |
+| Gast-zu-Workload-Rolle-Zuordnung, idempotenter Job | ✅ verifiziert | `GrantWorkloadRoleCommandHandler` + `GrantWorkloadRoleIdempotencyTests`, grün |
+| Notification Job erzeugt Mail-Vorschau im Mock-Modus | ✅ verifiziert | `MockEmailProvider` + `MockEmailProviderTests`, grün |
+| Interne Review Instance: Snapshot, Keep/Remove | ✅ Code kompiliert, Handler-Logik gegenlesen | `StartReviewHandler`/`ApplyReviewDecisionHandler` — kein dedizierter Unit-Test je Handler, aber Architecture-/Integration-Tests grün |
+| Remove → Revoke Job, entfernt nur Workload-Zugriff | ✅ Code kompiliert, Handler-Logik gegenlesen | `ApplyReviewDecisionHandler` enqueued `RevokeWorkloadRole`, rührt Gastidentität nicht an |
+| Deletion Gate blockiert bei allen 4 Blocker-Typen | ✅ verifiziert | `DeletionGateEvaluatorTests` deckt alle Fälle ab: ActiveWorkloadReference, UnclassifiedAccess, OpenJob, OpenReview, GracePeriod, ConnectorError, LiveCheck — grün |
+| Live Validation vor Disable/Delete | ✅ Code kompiliert, Logik gegengelesen | `LifecycleService.EvaluateDeletionAsync` ruft `IGuestDirectory.HasRelevantAccessAsync` nur auf, wenn alle anderen Blocker frei sind |
+| Audit Events mit CorrelationId für sicherheitsrelevante Commands | ✅ Code kompiliert, Logik gegengelesen | `AuditService` wird von allen Commands/LifecycleService aufgerufen |
 
-**Legende:** ✅ verifiziert · ⚠️ implementiert, aber nicht kompiliert/ausgeführt (siehe
-Abschnitt 1) · ❌ fehlt
+**Legende:** ✅ verifiziert (Test grün oder Build+Codelesung) · ⚠️ offen · ❌ fehlt
 
-## 4. Offene Integrationstests (DEV_INTEGRATION)
+Nicht in dieser Runde ausgeführt (siehe `prompts/02-test-mvp.md` Punkte 5/6/12): API/Worker
+in `LOCAL_MOCK` tatsächlich hochfahren und Jobs Ende-zu-Ende durch die Mock-Adapter
+schicken. Die Unit-/Integrationstests decken die einzelnen Bausteine ab, ein manueller
+End-to-End-Lauf über echte HTTP-Requests gegen eine laufende Instanz steht noch aus.
+
+## 5. Offene Integrationstests (DEV_INTEGRATION)
 
 Folgende Punkte sind laut Blueprint/MVP-Dokument bewusst **nicht** mit erfundenen Werten
 implementiert und bleiben expliziter nächster Schritt:
@@ -77,7 +98,15 @@ implementiert und bleiben expliziter nächster Schritt:
 - Echte Token-/Tenant-Validierung über Microsoft Entra (aktuell Header-basiert im MVP,
   siehe `HeaderTenantContextAccessor`).
 
-## 5. Security-/Tenant-Isolation-Befunde
+Für die Entra-ID-Voraussetzungen (App Registration + Graph Application Permissions) steht
+jetzt ein Automatisierungsskript bereit: `scripts/setup-entra-app.ps1` (Dry-Run per
+Default, `-Apply` legt tatsächlich an). Es ersetzt nicht die Notwendigkeit eines
+dedizierten Dev-Tenants, automatisiert aber das Anlegen der App Registration selbst.
+Optionale Key-Vault-Spiegelung der `.env.local`-Secrets: `scripts/sync-keyvault.ps1`
+(ebenfalls Dry-Run per Default). Details siehe README-Abschnitt "Entra-ID-Voraussetzungen
+automatisiert herstellen".
+
+## 6. Security-/Tenant-Isolation-Befunde
 
 - Alle InMemory-Repositories filtern zwingend nach `platformTenantId` als
   Pflichtparameter — kein Repository-Zugriff ohne Tenant-Kontext möglich.
@@ -87,29 +116,34 @@ implementiert und bleiben expliziter nächster Schritt:
   — Workloads/Connectoren können die Gastidentität im Code nicht direkt löschen.
 - `DeleteGuestHandler` prüft zusätzlich `ALLOW_GUEST_DELETE` (Default `false`).
 
-## 6. Bekannte Risiken
+## 7. Bekannte Risiken
 
-1. **Unverifizierter Backend-Code** — höchste Priorität: `dotnet restore/build/test`
-   lokal ausführen und alle Kompilierfehler beheben, bevor auf diesem Stand aufgebaut wird.
-2. Tenant-Kontext im MVP ist header-basiert, nicht token-validiert — nicht für
+1. Tenant-Kontext im MVP ist header-basiert, nicht token-validiert — nicht für
    produktiven Einsatz geeignet, nur für LOCAL_MOCK/Entwicklung.
-3. Keine Rate-Limit-/Retry-Feinsteuerung für den (noch nicht implementierten) Graph-Adapter.
-4. Kein persistenter Speicher (nur InMemory) — Neustart des Prozesses verliert alle Daten;
+2. Keine Rate-Limit-/Retry-Feinsteuerung für den (noch nicht implementierten) Graph-Adapter.
+3. Kein persistenter Speicher (nur InMemory) — Neustart des Prozesses verliert alle Daten;
    Cosmos-Adapter ist vorbereitet (Bicep-Modul vorhanden), aber nicht angebunden.
+4. Kein dedizierter API-Command für Workload-Erstellung im MVP (nur Guest-Invite,
+   Assignment-Grant/Revoke, Deletion-Validate) — Workloads aktuell nur über das Repository
+   direkt anlegbar, nicht über die API.
+5. Exception-Middleware fehlt weiterhin — `ITenantContextAccessor` wirft bei fehlendem
+   Header eine unbehandelte Exception (500 statt 400/401).
 
-## 7. Konkrete nächste Schritte
+## 8. Konkrete nächste Schritte
 
-1. `dotnet restore && dotnet build -c Debug && dotnet test -c Debug` lokal ausführen und
-   alle gemeldeten Fehler beheben.
-2. `docs/architecture/mvp-test-report.md` (diese Datei) nach echtem Testlauf mit realen
-   Ergebnissen aktualisieren.
-3. Fehlende API-Commands ergänzen (Workload-Erstellung, Review-Start/-Decision-Endpoints).
-4. DEV_INTEGRATION vorbereiten: dedizierten Entra Dev-Tenant + App Registration +
-   Shared Mailbox einrichten (siehe README "Drei Development-Modi").
+1. Fehlende API-Commands ergänzen (Workload-Erstellung, Review-Start/-Decision-Endpoints).
+2. Manuellen End-to-End-Lauf gegen eine laufende `LOCAL_MOCK`-Instanz durchführen
+   (`dotnet run` für Api/Worker, `npm run dev` für Web, Jobs über HTTP anstoßen) —
+   bisher nur auf Unit-/Integrationstest-Ebene verifiziert.
+3. DEV_INTEGRATION vorbereiten: dedizierten Entra Dev-Tenant einrichten und
+   `scripts/setup-entra-app.ps1 -Apply -WriteEnvLocal` ausführen; Shared Mailbox
+   separat bereitstellen (kein Skript, da Exchange-/M365-Provisioning außerhalb von
+   Entra-ID-Objekten liegt).
+4. Exception-Middleware für konsistente 401/403-Antworten ergänzen.
 
 ## Gesamtstatus
 
-**PASS WITH PENDING INTEGRATIONS** — unter dem Vorbehalt, dass der Backend-Code noch
-nicht lokal kompiliert/getestet wurde (siehe Abschnitt 1). Das Frontend ist vollständig
-verifiziert. Führe vor jeder weiteren Nutzung zwingend `dotnet build`/`dotnet test` lokal
-aus.
+**PASS WITH PENDING INTEGRATIONS** — Frontend und Backend bauen und testen vollständig
+grün (31/31 .NET-Tests, 2/2 Frontend-Tests). Offen bleiben ausschließlich die bewusst
+nicht simulierten externen Integrationen (echter Graph-Write, echter Mail-Versand,
+Token-Validierung) sowie die in Abschnitt 7/8 genannten funktionalen Lücken.

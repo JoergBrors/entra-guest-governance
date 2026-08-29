@@ -94,6 +94,38 @@ Lokale Endpunkte:
 > reale Adapter frei. Secrets werden nie in `.env`-Dateien committed — nutze User Secrets /
 > Key Vault / Managed Identity.
 
+## Entra-ID-Voraussetzungen automatisiert herstellen (DEV_INTEGRATION)
+
+Für `DEV_INTEGRATION` wird eine App Registration mit Graph-Application-Permissions
+(`User.Invite.All`, `Mail.Send`, `Group.ReadWrite.All`, `User.Read.All`) benötigt. Dies
+kann per Microsoft Graph PowerShell automatisiert werden — es werden dabei **keine**
+Azure-Compute-/Storage-Ressourcen angelegt, nur Objekte in Entra ID:
+
+```powershell
+# Dry-Run (Default) — zeigt nur an, was angelegt würde
+./scripts/setup-entra-app.ps1
+
+# Tatsächlich anlegen und Werte nach .env.local schreiben (nicht committed)
+./scripts/setup-entra-app.ps1 -Apply -WriteEnvLocal
+```
+
+Voraussetzung: [Microsoft.Graph PowerShell SDK](https://learn.microsoft.com/powershell/microsoftgraph)
+(`Install-Module Microsoft.Graph -Scope CurrentUser`) und ein Konto mit
+`Application.ReadWrite.All` + `AppRoleAssignment.ReadWrite.All` im Ziel-Tenant (idealerweise
+ein dedizierter Entra Dev-Tenant, niemals ein Produktions-Tenant).
+
+Optional: Spiegelung der `.env.local`-Secrets in einen Azure Key Vault, sobald ein Vault via
+`infra/modules/key-vault.bicep` (Parameter `deployKeyVault=true` in `main.bicep`, Default
+`false`) deployt wurde:
+
+```powershell
+./scripts/sync-keyvault.ps1 -VaultName <name> -Apply
+```
+
+Beide Skripte laufen standardmäßig im Dry-Run (`-WhatIf`-Charakter) und ändern ohne
+`-Apply` nichts. In der lokalen Entwicklung (`LOCAL_MOCK`) ist keines der beiden Skripte
+erforderlich.
+
 ## Codex-Prompts
 
 `prompts/01-bootstrap-mvp.md` und `prompts/02-test-mvp.md` sind die im Development-Dokument
@@ -105,6 +137,11 @@ MVP-Anforderungen zu prüfen.
 
 Siehe `docs/architecture/mvp-test-report.md` für den aktuellen Status, offene
 Integrationstests und nächste Schritte.
+
+## Prompt-Dokumentation
+
+Siehe `docs/prompts/` für eine Zusammenfassung je ausgeführtem Auftrag (was beauftragt,
+was getan, welches Ergebnis) — beginnend mit dem initialen Bootstrap.
 
 ## Nicht festgelegt / bewusst offen gelassen
 

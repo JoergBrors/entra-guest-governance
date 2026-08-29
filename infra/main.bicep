@@ -21,6 +21,12 @@ param environmentName string = 'poc'
 @description('GitHub-Repository-URL für Azure Static Web Apps Deployment (optional, kann leer bleiben und später verknüpft werden).')
 param staticWebAppRepositoryUrl string = ''
 
+@description('Key Vault zur Spiegelung von .env-Werten (DEV_INTEGRATION/AZURE_DEV) mitdeployen. Default false — in der lokalen Entwicklung werden bewusst keine Azure-Ressourcen erzeugt (siehe README "Drei Development-Modi").')
+param deployKeyVault bool = false
+
+@description('Object-ID des Principals mit Secrets-Zugriff auf den Key Vault (nur relevant wenn deployKeyVault=true).')
+param keyVaultAccessPrincipalId string = ''
+
 var tags = {
   project: 'b2b-guest-governance-portal'
   environment: environmentName
@@ -55,6 +61,17 @@ module automation 'modules/automation.bicep' = {
   }
 }
 
+module keyVault 'modules/key-vault.bicep' = if (deployKeyVault) {
+  name: 'keyVaultDeployment'
+  params: {
+    name: '${namePrefix}-kv'
+    location: location
+    tags: tags
+    accessPrincipalId: keyVaultAccessPrincipalId
+  }
+}
+
 output staticWebAppDefaultHostname string = staticWebApp.outputs.defaultHostname
 output cosmosAccountEndpoint string = cosmos.outputs.documentEndpoint
 output automationAccountName string = automation.outputs.accountName
+output keyVaultUri string = deployKeyVault ? keyVault!.outputs.vaultUri : ''

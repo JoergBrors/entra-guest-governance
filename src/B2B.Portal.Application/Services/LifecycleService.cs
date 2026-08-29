@@ -18,8 +18,7 @@ public sealed class LifecycleService(
     IJobRepository jobRepository,
     IReviewRepository reviewRepository,
     IGuestDirectory guestDirectory,
-    AuditService auditService,
-    IClock clock)
+    AuditService auditService)
 {
     /// <summary>
     /// Führt das Deletion Gate im Dry-Run aus: prüft alle Blocker inklusive Live Validation,

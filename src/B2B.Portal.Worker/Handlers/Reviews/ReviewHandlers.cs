@@ -57,7 +57,6 @@ public sealed class StartReviewHandler(
 /// </summary>
 public sealed class ApplyReviewDecisionHandler(
     IReviewRepository reviewRepository,
-    IAssignmentRepository assignmentRepository,
     IJobQueue jobQueue,
     ILogger<ApplyReviewDecisionHandler> logger) : IJobHandler
 {

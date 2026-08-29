@@ -56,7 +56,6 @@ public sealed class GrantWorkloadRoleHandler(
 }
 
 public sealed class RevokeWorkloadRoleHandler(
-    IAssignmentRepository assignmentRepository,
     IResourceConnector connector,
     ILogger<RevokeWorkloadRoleHandler> logger) : IJobHandler
 {
