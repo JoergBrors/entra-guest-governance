@@ -58,6 +58,35 @@ Tenant-IDs, Secrets, Group-IDs oder Mailboxen im Repository hinterlegt (siehe Bl
 
 ## Quick Start
 
+### 0) Voraussetzungen prüfen (empfohlen vor dem ersten Start)
+
+```powershell
+# Nur prüfen (Runtimes/Tools, freie Ports) — ändert nur .env.local/vite.config.ts, keine Cloud-Ressourcen
+./scripts/requirements.ps1
+
+# Fehlende Tools nachinstallieren + Cosmos DB Emulator + Azurite (Storage Emulator) lokal initialisieren
+./scripts/requirements.ps1 -Install -InitCosmosEmulator -InstallCosmosEmulator -InitStorageEmulator -InstallStorageEmulator
+```
+
+Prüft .NET SDK, Node.js/npm, Bicep CLI, Azure CLI, Microsoft.Graph PowerShell SDK, den
+lokalen Cosmos DB Emulator und Azurite (lokaler Azure Storage Emulator); ermittelt freie
+Ports für API/Web (weicht bei Belegung automatisch aus und zeigt an, welcher Prozess den
+Port blockiert) und schreibt sie nach `.env.local` bzw. `vite.config.ts`. Mit
+`-InitCosmosEmulator`/`-InitStorageEmulator` werden die jeweiligen Connection Strings
+(Well-Known-Emulator-Keys, keine echten Secrets) ebenfalls nach `.env.local` geschrieben.
+Details siehe Kommentarkopf des Skripts.
+
+Der ermittelte API-Port wird zusätzlich als `ASPNETCORE_URLS` nach `.env.local`
+geschrieben — `.vscode/launch.json` ("Portal API") lädt diese Datei über `envFile` und
+startet damit automatisch auf demselben Port wie `dotnet run`/das Skript, ohne manuelle
+Anpassung der Launch-Konfiguration.
+
+**Bekannter Fallstrick:** Läuft bereits ein eigener `npm run dev`, bindet Vite sich beim
+nächsten Start wieder an den zuletzt in `vite.config.ts` eingetragenen Port — ein
+paralleler zweiter Start auf demselben Port schlägt dann fehl ("Port already in use"),
+auch wenn `requirements.ps1` zuvor einen anderen Port ausgewichen hat. Das Skript weist ab
+sofort per Warnung darauf hin, welcher Prozess (PID, Kommandozeile) einen Port blockiert.
+
 ```bash
 # 1) .NET Backend
 dotnet restore
@@ -81,10 +110,28 @@ Lokale Endpunkte:
 
 | Komponente | URL |
 | --- | --- |
-| Web UI | http://localhost:5173 |
+| Web UI | http://localhost:5301 |
 | Portal API | http://localhost:5000 |
 | Health | http://localhost:5000/health |
 | Worker | Hintergrundprozess / Konsolenlog |
+
+### 4) Aussagekräftige Mockdaten laden (optional)
+
+Für Demos/UI-Tests mit realistischer Datenmenge — ein Workload mit mehreren Rollen und
+500 (konfigurierbar) Gästen, verteilt über mehrere Beispielfirmen, Lifecycle-Status und
+Rollen:
+
+```powershell
+./scripts/seed-large-workload.ps1
+# oder mit eigener Anzahl/Name:
+./scripts/seed-large-workload.ps1 -GuestCount 1500 -WorkloadName "Onboarding-Projekt Nord"
+```
+
+Ruft `POST /api/dev/seed/large-workload` auf — ein Endpoint, der **nur unter
+`B2B_MODE=LOCAL_MOCK`** registriert ist (siehe `src/B2B.Portal.Api/Program.cs`) und
+ausschließlich in die lokalen InMemory-Repositories schreibt. Ergebnis danach sichtbar in
+der Web-UI (Guest Pool, Workloads-Admin-Ansicht) oder direkt über `/api/guest-accounts`
+bzw. `/api/workloads`.
 
 ## Sicherheitswarnung (Definition of Safe Local Development)
 

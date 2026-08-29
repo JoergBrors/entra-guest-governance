@@ -16,6 +16,9 @@ coverage/
 *.local.json
 appsettings.*.local.json
 
+# Lokale Emulator-Datenverzeichnisse (scripts/requirements.ps1 -InitStorageEmulator)
+.azurite/
+
 # OS
 .DS_Store
 Thumbs.db

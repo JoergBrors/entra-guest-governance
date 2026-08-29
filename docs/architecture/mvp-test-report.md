@@ -46,6 +46,32 @@ Ressourcendetails (ResourceType, ExternalId) — direkte Umsetzung von Blueprint
 | --- | --- |
 | `az bicep build --file infra/main.bicep --stdout` | ✅ Kompiliert fehlerfrei zu ARM-JSON (rein lokal, **keine** Azure-Ressourcen erzeugt) |
 
+### 2.4 Manueller End-to-End-Lauf gegen LOCAL_MOCK (29. August 2026)
+
+API (`dotnet run --project src/B2B.Portal.Api`), Worker
+(`dotnet run --project src/B2B.Portal.Worker`) und Web
+(`npm run dev`, Port siehe unten) wurden gemeinsam lokal gestartet und über HTTP geprüft:
+
+| Prüfung | Ergebnis |
+| --- | --- |
+| `GET /health` | ✅ `{"status":"healthy","mode":"LOCAL_MOCK"}` |
+| `GET /api/guest-accounts` ohne `X-Platform-Tenant-Id` | ⚠️ HTTP 500 (unbehandelte Exception statt 400/401 — siehe Abschnitt 7, bereits als bekannte Lücke dokumentiert) |
+| `GET /api/guest-accounts`/`workloads`/`reviews`/`audit-events` mit Header | ✅ jeweils `[]` (leer, aber korrekt authentifiziert) |
+| `POST /api/guests/invite` (Tenant `dev-tenant-a`) | ✅ legt `GuestAccount` an, per anschließendem `GET` wieder auffindbar |
+| `GET /api/guest-accounts` als Tenant `dev-tenant-b` | ✅ leere Liste — Gast aus `dev-tenant-a` ist für `dev-tenant-b` nicht sichtbar (Tenant-Isolation negativ bestätigt) |
+| `POST /api/deletion-candidates/{id}/validate` | ✅ `{"result":1,"blockers":[]}` — Deletion Gate Dry-Run ohne Blocker liefert "Ready", kein echter Delete ausgelöst |
+| Web-UI (`GET /`) | ✅ HTTP 200 |
+| CORS mit `Origin: <Web-URL>` | ✅ `Access-Control-Allow-Origin` korrekt gesetzt |
+| Worker-Log beim Start | ✅ "LOCAL_MOCK aktiv — keine externen Directory-/Mail-Schreibzugriffe." |
+
+**Wichtige Beobachtung:** API und Worker halten im MVP getrennte In-Memory-Zustände (zwei
+Prozesse, kein gemeinsamer Speicher) — ein über die API erzeugter `InviteGuest`-Job wird
+vom Worker-Prozess nicht sichtbar verarbeitet, obwohl der Guest-Account selbst über den
+API-eigenen In-Memory-Store korrekt persistiert und abrufbar ist. Das ist eine direkte
+Folge des in Abschnitt 7 dokumentierten Risikos "kein persistenter Speicher" und keine
+neue Lücke — für einen echten Job-Fluss über Prozessgrenzen hinweg wird der geplante
+Cosmos-Adapter (`infra/modules/cosmos-free-tier.bicep`) benötigt.
+
 ## 3. Am 29. August 2026 behobene Kompilierfehler
 
 Beim ersten echten `dotnet build` traten drei Fehler vom Typ `CS9113` (ungelesener
@@ -122,7 +148,11 @@ automatisiert herstellen".
    produktiven Einsatz geeignet, nur für LOCAL_MOCK/Entwicklung.
 2. Keine Rate-Limit-/Retry-Feinsteuerung für den (noch nicht implementierten) Graph-Adapter.
 3. Kein persistenter Speicher (nur InMemory) — Neustart des Prozesses verliert alle Daten;
-   Cosmos-Adapter ist vorbereitet (Bicep-Modul vorhanden), aber nicht angebunden.
+   Cosmos-Adapter ist vorbereitet (Bicep-Modul vorhanden), aber nicht angebunden. **Zusätzlich
+   bestätigt (Abschnitt 2.4):** API und Worker sind getrennte Prozesse mit jeweils eigenem
+   In-Memory-Zustand — ein von der API enqueued Job ist für den separat laufenden Worker
+   nicht sichtbar. Ohne Cosmos-Adapter funktioniert der Job-Fluss nur innerhalb eines
+   einzigen Prozesses (z. B. in Integrationstests über `WebApplicationFactory`).
 4. Kein dedizierter API-Command für Workload-Erstellung im MVP (nur Guest-Invite,
    Assignment-Grant/Revoke, Deletion-Validate) — Workloads aktuell nur über das Repository
    direkt anlegbar, nicht über die API.
