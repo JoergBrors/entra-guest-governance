@@ -65,17 +65,18 @@ internal sealed class ReviewItemDocument
     [JsonPropertyName("decision")] public required ReviewDecision Decision { get; init; }
     [JsonPropertyName("decidedBy")] public string? DecidedBy { get; init; }
     [JsonPropertyName("decidedAt")] public DateTimeOffset? DecidedAt { get; init; }
+    [JsonPropertyName("reason")] public string? Reason { get; init; }
 
     public static ReviewItemDocument FromEntity(ReviewItem i) => new()
     {
         Id = i.Id, ReviewInstanceId = i.ReviewInstanceId, AssignmentId = i.AssignmentId,
-        Decision = i.Decision, DecidedBy = i.DecidedBy, DecidedAt = i.DecidedAt,
+        Decision = i.Decision, DecidedBy = i.DecidedBy, DecidedAt = i.DecidedAt, Reason = i.Reason,
     };
 
     public ReviewItem ToEntity() => new()
     {
         Id = Id, ReviewInstanceId = ReviewInstanceId, AssignmentId = AssignmentId,
-        Decision = Decision, DecidedBy = DecidedBy, DecidedAt = DecidedAt,
+        Decision = Decision, DecidedBy = DecidedBy, DecidedAt = DecidedAt, Reason = Reason,
     };
 }
 

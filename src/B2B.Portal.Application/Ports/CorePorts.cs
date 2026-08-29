@@ -65,6 +65,12 @@ public interface IClock
 public interface IGuestAccountRepository
 {
     Task<GuestAccount?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
+
+    /// <summary>E-Mail ist der fachlich eindeutige Schlüssel für einen Gast (siehe
+    /// GuestImportService) — case-insensitive, da Mail-Adressen üblicherweise
+    /// case-insensitiv behandelt werden.</summary>
+    Task<GuestAccount?> GetByMailAsync(TenantContext tenant, string mail, CancellationToken ct);
+
     Task<IReadOnlyList<GuestAccount>> ListAsync(TenantContext tenant, CancellationToken ct);
     Task UpsertAsync(GuestAccount guest, CancellationToken ct);
 }
@@ -148,4 +154,23 @@ public interface IExternalOrganizationRepository
     Task<ExternalOrganization?> GetByNameAsync(TenantContext tenant, string name, CancellationToken ct);
     Task<IReadOnlyList<ExternalOrganization>> ListAsync(TenantContext tenant, CancellationToken ct);
     Task UpsertAsync(ExternalOrganization organization, CancellationToken ct);
+}
+
+/// <summary>Ein Sheet als Zeilen von Rohwerten, gelesen ab der Kopfzeile — die technische
+/// xlsx-Bibliothek (ClosedXML) bleibt bewusst in Infrastructure gekapselt, Application
+/// kennt nur diese schmale Abstraktion (dieselbe Trennung wie bei allen anderen technischen
+/// Adaptern: IGuestDirectory, IEmailProvider, ...).</summary>
+public interface ISpreadsheetReader
+{
+    IReadOnlyList<string> GetSheetNames(Stream xlsxStream);
+
+    /// <summary>Liest die Kopfzeile eines Sheets ab der gegebenen Spalte — endet an der
+    /// ersten leeren Zelle.</summary>
+    IReadOnlyList<string> ReadHeaderRow(Stream xlsxStream, string sheetName, int headerRowIndex, int dataStartColumnIndex);
+
+    /// <summary>Liest alle Datenzeilen ab headerRowIndex+1 als Rohwerte (Spalten-Offset ab
+    /// dataStartColumnIndex, 0-basiert) — endet an der ersten Zeile, deren erste Datenspalte
+    /// leer ist.</summary>
+    IReadOnlyList<IReadOnlyDictionary<int, string>> ReadDataRows(
+        Stream xlsxStream, string sheetName, int headerRowIndex, int dataStartColumnIndex);
 }

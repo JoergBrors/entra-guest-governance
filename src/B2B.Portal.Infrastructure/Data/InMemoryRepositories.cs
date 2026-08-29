@@ -29,6 +29,10 @@ public sealed class InMemoryGuestAccountRepository : IGuestAccountRepository
         return Task.FromResult(guest is not null && tenant.Owns(guest.PlatformTenantId) ? guest : null);
     }
 
+    public Task<GuestAccount?> GetByMailAsync(TenantContext tenant, string mail, CancellationToken ct) =>
+        Task.FromResult(_store.Values.FirstOrDefault(
+            g => tenant.Owns(g.PlatformTenantId) && string.Equals(g.Mail, mail, StringComparison.OrdinalIgnoreCase)));
+
     public Task<IReadOnlyList<GuestAccount>> ListAsync(TenantContext tenant, CancellationToken ct) =>
         Task.FromResult<IReadOnlyList<GuestAccount>>(
             _store.Values.Where(g => tenant.Owns(g.PlatformTenantId)).ToList());

@@ -42,4 +42,11 @@ public sealed class ReviewItem
     public ReviewDecision Decision { get; set; } = ReviewDecision.Pending;
     public string? DecidedBy { get; set; }
     public DateTimeOffset? DecidedAt { get; set; }
+
+    /// <summary>Freier Erklärungstext, warum dieses Item zur Prüfung markiert wurde — z.B.
+    /// vom Excel-Gäste-Import gesetzt, wenn sich Gast-Daten geändert haben und eine
+    /// bestehende Zuweisung in einem ANDEREN Workload dadurch fachlich fragwürdig werden
+    /// könnte (siehe GuestImportService). Optional, da regulär entstandene ReviewItems
+    /// (z.B. turnusmäßige Access Reviews) keinen Grund brauchen.</summary>
+    public string? Reason { get; set; }
 }

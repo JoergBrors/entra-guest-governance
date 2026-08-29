@@ -33,6 +33,33 @@ public sealed class CosmosGuestAccountRepository(CosmosClientFactory factory) : 
         }
     }
 
+    public async Task<GuestAccount?> GetByMailAsync(TenantContext tenant, string mail, CancellationToken ct)
+    {
+        // Case-insensitiver Vergleich per UPPER() beidseitig, da Cosmos SQL keine
+        // eingebaute Ordinal-Ignore-Case-Funktion kennt — dieselbe Konvention wie
+        // CosmosExternalOrganizationRepository.GetByNameAsync (dort clientseitig gefiltert;
+        // hier serverseitig, da GuestAccounts deutlich zahlreicher sein können).
+        var query = Container.GetItemQueryIterator<GuestAccountDocument>(
+            new QueryDefinition(
+                "SELECT * FROM c WHERE c.platformTenantId = @tenant AND c.entityType = @type " +
+                "AND UPPER(c.mail) = UPPER(@mail)")
+                .WithParameter("@tenant", tenant.PlatformTenantId)
+                .WithParameter("@type", EntityType)
+                .WithParameter("@mail", mail),
+            requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey(tenant.PlatformTenantId) });
+
+        while (query.HasMoreResults)
+        {
+            var page = await query.ReadNextAsync(ct);
+            var match = page.FirstOrDefault();
+            if (match is not null)
+            {
+                return match.ToEntity();
+            }
+        }
+        return null;
+    }
+
     public async Task<IReadOnlyList<GuestAccount>> ListAsync(TenantContext tenant, CancellationToken ct)
     {
         var query = Container.GetItemQueryIterator<GuestAccountDocument>(
