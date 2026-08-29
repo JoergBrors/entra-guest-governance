@@ -1,5 +1,6 @@
 using B2B.Portal.Api.Tenancy;
 using B2B.Portal.Application.Commands;
+using B2B.Portal.Application.Import;
 using B2B.Portal.Application.Ports;
 using B2B.Portal.Application.Scenarios;
 using B2B.Portal.Application.Services;
@@ -32,6 +33,7 @@ builder.Services.AddSingleton<RevokeWorkloadRoleCommandHandler>();
 builder.Services.AddSingleton<DeployScenarioCommandHandler>();
 builder.Services.AddSingleton<ScenarioImportExportService>();
 builder.Services.AddSingleton<WorkloadManagementService>();
+builder.Services.AddSingleton<GuestImportService>();
 
 builder.Services.AddCors(o => o.AddDefaultPolicy(p => p
     .WithOrigins(builder.Configuration["WEB_BASE_URL"] ?? "http://localhost:5301")
@@ -359,6 +361,57 @@ app.MapDelete("/api/scenarios/{id:guid}", async (
     }
 });
 
+// ---- Excel-Gäste-Import -----------------------------------------------------
+// Erster echter Datei-Upload-Endpoint im Projekt (multipart/form-data, IFormFile) — die
+// bestehenden Import-Endpoints (Szenario-Template) nehmen reines JSON. Ablauf: inspect
+// (Sheet-/Spaltennamen ermitteln) -> preview (Dry-Run, keine Schreibzugriffe) -> commit
+// (schreibt Gäste/Zuweisungen, siehe GuestImportService). Mapping wird als JSON-String im
+// Formularfeld "mapping" mitgeschickt (kein natives multipart-JSON-Binding in Minimal APIs).
+app.MapPost("/api/guest-import/inspect", async (
+    HttpRequest request, GuestImportService importService, CancellationToken ct) =>
+{
+    var form = await request.ReadFormAsync(ct);
+    var file = form.Files.GetFile("file");
+    if (file is null || file.Length == 0)
+    {
+        return Results.BadRequest(new { error = "Keine Datei im Formularfeld 'file' gefunden." });
+    }
+
+    var sheetName = form["sheetName"].FirstOrDefault();
+    var headerRowIndex = int.TryParse(form["headerRowIndex"].FirstOrDefault(), out var h) ? h : 1;
+    var dataStartColumnIndex = int.TryParse(form["dataStartColumnIndex"].FirstOrDefault(), out var c) ? c : 1;
+
+    await using var stream = file.OpenReadStream();
+    var result = importService.Inspect(stream, sheetName, headerRowIndex, dataStartColumnIndex);
+    return Results.Ok(result);
+});
+
+app.MapPost("/api/guest-import/preview", async (
+    HttpRequest request, ITenantContextAccessor tenantCtx, GuestImportService importService, CancellationToken ct) =>
+{
+    var (stream, mapping, error) = await ReadGuestImportForm(request, ct);
+    if (error is not null)
+    {
+        return Results.BadRequest(new { error });
+    }
+
+    var result = await importService.PreviewAsync(tenantCtx.Current, stream!, mapping!, ct);
+    return Results.Ok(result);
+});
+
+app.MapPost("/api/guest-import/commit", async (
+    HttpRequest request, ITenantContextAccessor tenantCtx, GuestImportService importService, CancellationToken ct) =>
+{
+    var (stream, mapping, error) = await ReadGuestImportForm(request, ct);
+    if (error is not null)
+    {
+        return Results.BadRequest(new { error });
+    }
+
+    var result = await importService.CommitAsync(tenantCtx.Current, stream!, mapping!, actor: "api-user", ct);
+    return Results.Ok(result);
+});
+
 // ---- Dev-Only Seed (nur LOCAL_MOCK) ---------------------------------------
 // Erzeugt aussagekräftige Demo-/Mockdaten: einen Workload mit mehreren Rollen und eine
 // konfigurierbare Anzahl Gäste inkl. Assignments, direkt über die vorhandenen Repositories
@@ -426,6 +479,56 @@ if (mode == "LOCAL_MOCK")
 
 app.Run();
 
+// ---- Helfer für den Excel-Gäste-Import --------------------------------------
+// Liest Datei + Mapping-JSON aus einem multipart/form-data-Request. Gibt den Datei-Stream
+// (Aufrufer ist für das Schließen verantwortlich — MemoryStream wird hier bewusst
+// zwischengepuffert, da ISpreadsheetReader den Stream mehrfach von Position 0 liest) sowie
+// das geparste Mapping zurück, oder eine Fehlermeldung statt beidem.
+static async Task<(Stream? Stream, GuestImportColumnMapping? Mapping, string? Error)> ReadGuestImportForm(
+    HttpRequest request, CancellationToken ct)
+{
+    var form = await request.ReadFormAsync(ct);
+    var file = form.Files.GetFile("file");
+    if (file is null || file.Length == 0)
+    {
+        return (null, null, "Keine Datei im Formularfeld 'file' gefunden.");
+    }
+
+    var mappingJson = form["mapping"].FirstOrDefault();
+    if (string.IsNullOrWhiteSpace(mappingJson))
+    {
+        return (null, null, "Kein Mapping im Formularfeld 'mapping' gefunden.");
+    }
+
+    GuestImportMappingBody? mappingBody;
+    try
+    {
+        mappingBody = System.Text.Json.JsonSerializer.Deserialize<GuestImportMappingBody>(
+            mappingJson, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+    }
+    catch (System.Text.Json.JsonException ex)
+    {
+        return (null, null, $"Mapping konnte nicht gelesen werden: {ex.Message}");
+    }
+    if (mappingBody is null)
+    {
+        return (null, null, "Mapping konnte nicht gelesen werden.");
+    }
+
+    var buffer = new MemoryStream();
+    await using (var uploadStream = file.OpenReadStream())
+    {
+        await uploadStream.CopyToAsync(buffer, ct);
+    }
+    buffer.Position = 0;
+
+    var mapping = new GuestImportColumnMapping(
+        mappingBody.SheetName, mappingBody.HeaderRowIndex, mappingBody.DataStartColumnIndex,
+        mappingBody.ColumnToField.ToDictionary(kv => int.Parse(kv.Key), kv => kv.Value));
+
+    return (buffer, mapping, null);
+}
+
 // ---- Request-DTOs ----------------------------------------------------------
 public sealed record InviteGuestBody(string Mail, string DisplayName, string? DirectoryTenantId = null);
 public sealed record AssignmentBody(Guid GuestId, Guid RoleId);
@@ -434,6 +537,13 @@ public sealed record SeedLargeWorkloadBody(int? GuestCount, string? WorkloadName
 public sealed record UpdateWorkloadBody(string Name, string? Owner);
 public sealed record UpsertWorkloadRoleBody(string Name, List<Guid> ResourceMappings);
 public sealed record UpsertWorkloadResourceBody(string ResourceType, string? ExternalId);
+
+/// <summary>JSON-Form des GuestImportColumnMapping für den multipart-Formularfeld
+/// "mapping" — ColumnToField kommt als Dictionary&lt;string,string&gt; über JSON (Spalten-
+/// Offset als String-Schlüssel, da JSON keine numerischen Objekt-Schlüssel kennt) und wird
+/// in ReadGuestImportForm zu Dictionary&lt;int,string&gt; konvertiert.</summary>
+public sealed record GuestImportMappingBody(
+    string SheetName, int HeaderRowIndex, int DataStartColumnIndex, Dictionary<string, string> ColumnToField);
 
 /// <summary>
 /// Deterministische, aussagekräftige Demo-Daten für den Dev-Seed-Endpoint

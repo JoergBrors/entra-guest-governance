@@ -3,6 +3,7 @@ using B2B.Portal.Infrastructure.Data;
 using B2B.Portal.Infrastructure.Data.Cosmos;
 using B2B.Portal.Infrastructure.Directory;
 using B2B.Portal.Infrastructure.Email;
+using B2B.Portal.Infrastructure.Import;
 using B2B.Portal.Infrastructure.Queue;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -35,6 +36,7 @@ public static class InfrastructureServiceCollectionExtensions
         var allowGraphWrites = bool.TryParse(configuration["ALLOW_GRAPH_WRITES"], out var g) && g;
 
         services.AddSingleton<IClock, SystemClock>();
+        services.AddSingleton<ISpreadsheetReader, ClosedXmlSpreadsheetReader>();
 
         // "cosmos" (Default unter LOCAL_MOCK) nutzt den lokalen Cosmos DB Emulator (siehe
         // scripts/requirements.ps1 -InitCosmosEmulator) oder eine echte Cosmos-DB in

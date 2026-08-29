@@ -8,6 +8,7 @@ import { WorkloadsAdminPage } from './pages/WorkloadsAdminPage';
 import { ScenariosPage } from './pages/ScenariosPage';
 import { ReviewsPage } from './pages/ReviewsPage';
 import { AuditPage } from './pages/AuditPage';
+import { GuestImportPage } from './pages/GuestImportPage';
 
 export function App() {
   return (
@@ -20,6 +21,7 @@ export function App() {
             <Route path="guest-pool" element={<GuestPoolPage />} />
             <Route path="workloads" element={<WorkloadsAdminPage />} />
             <Route path="workloads/:workloadId/scenarios" element={<ScenariosPage />} />
+            <Route path="guest-import" element={<GuestImportPage />} />
             <Route path="reviews" element={<ReviewsPage />} />
             <Route path="audit" element={<AuditPage />} />
           </Route>

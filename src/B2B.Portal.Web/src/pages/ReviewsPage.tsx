@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  Title2, Text, Card, Badge, Spinner, makeStyles,
+  Title2, Text, Card, Badge, Spinner, makeStyles, tokens,
 } from '@fluentui/react-components';
 import { api } from '../api/client';
 import type { ReviewInstance } from '../types/domain';
@@ -8,7 +8,8 @@ import type { ReviewInstance } from '../types/domain';
 const useStyles = makeStyles({
   list: { display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '16px' },
   card: { padding: '16px 20px' },
-  itemRow: { display: 'flex', justifyContent: 'space-between', padding: '4px 0' },
+  itemRow: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', alignItems: 'flex-start', gap: '12px' },
+  reason: { color: tokens.colorNeutralForeground3, maxWidth: '480px', textAlign: 'right' },
 });
 
 const decisionColor: Record<string, 'success' | 'danger' | 'warning' | 'informative'> = {
@@ -51,6 +52,7 @@ export function ReviewsPage() {
             {r.items.map((item) => (
               <div key={item.id} className={styles.itemRow}>
                 <Text size={200}>Assignment {item.assignmentId.slice(0, 8)}</Text>
+                {item.reason && <Text size={200} className={styles.reason}>{item.reason}</Text>}
                 <Badge color={decisionColor[item.decision]}>{item.decision}</Badge>
               </div>
             ))}

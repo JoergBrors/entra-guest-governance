@@ -2,6 +2,7 @@ import type {
   GuestAccount, Workload, WorkloadRole, WorkloadResource, WorkloadAssignmentCounts,
   GuestWorkloadAssignment, ReviewInstance, AuditEvent, DeletionGateEvaluation,
   WorkloadScenario, ScenarioTemplateDto, ScenarioImportResult,
+  GuestImportInspectResult, GuestImportColumnMapping, GuestImportResult,
 } from '../types/domain';
 
 // API_BASE_URL und der Platform-Tenant kommen aus Vite-Env-Variablen (siehe .env.example
@@ -41,6 +42,45 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+/** Wie request(), aber ohne Content-Type-Header — der Browser setzt bei FormData die
+ * multipart/form-data-Boundary selbst; ein manuell gesetzter Content-Type ohne Boundary
+ * würde das Parsen serverseitig brechen. Für den Excel-Gäste-Import (erster Datei-Upload
+ * im Projekt). */
+async function requestForm<T>(path: string, form: FormData): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'POST',
+    headers: { 'X-Platform-Tenant-Id': DEV_PLATFORM_TENANT_ID },
+    body: form,
+  });
+
+  if (!response.ok) {
+    const fallback = `API-Fehler ${response.status} bei ${path}`;
+    let message = fallback;
+    try {
+      const body = (await response.json()) as { error?: string };
+      message = body.error ?? fallback;
+    } catch {
+      // Antwort war kein JSON -> Fallback-Meldung behalten.
+    }
+    throw new Error(message);
+  }
+
+  return (await response.json()) as T;
+}
+
+function mappingToFormValue(mapping: GuestImportColumnMapping): string {
+  const columnToField: Record<string, string> = {};
+  for (const [key, value] of Object.entries(mapping.columnToField)) {
+    columnToField[key] = value;
+  }
+  return JSON.stringify({
+    sheetName: mapping.sheetName,
+    headerRowIndex: mapping.headerRowIndex,
+    dataStartColumnIndex: mapping.dataStartColumnIndex,
+    columnToField,
+  });
 }
 
 export const api = {
@@ -143,4 +183,27 @@ export const api = {
 
   deleteScenario: (scenarioId: string) =>
     request<void>(`/api/scenarios/${scenarioId}`, { method: 'DELETE' }),
+
+  inspectGuestImportFile: (file: File, sheetName: string | null, headerRowIndex: number, dataStartColumnIndex: number) => {
+    const form = new FormData();
+    form.append('file', file);
+    if (sheetName) form.append('sheetName', sheetName);
+    form.append('headerRowIndex', String(headerRowIndex));
+    form.append('dataStartColumnIndex', String(dataStartColumnIndex));
+    return requestForm<GuestImportInspectResult>('/api/guest-import/inspect', form);
+  },
+
+  previewGuestImport: (file: File, mapping: GuestImportColumnMapping) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('mapping', mappingToFormValue(mapping));
+    return requestForm<GuestImportResult>('/api/guest-import/preview', form);
+  },
+
+  commitGuestImport: (file: File, mapping: GuestImportColumnMapping) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('mapping', mappingToFormValue(mapping));
+    return requestForm<GuestImportResult>('/api/guest-import/commit', form);
+  },
 };

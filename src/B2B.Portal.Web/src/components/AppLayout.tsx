@@ -64,6 +64,9 @@ export function AppLayout() {
         <NavLink to="/workloads" className={styles.navLink}>
           Workloads
         </NavLink>
+        <NavLink to="/guest-import" className={styles.navLink}>
+          Gäste-Import
+        </NavLink>
         <NavLink to="/reviews" className={styles.navLink}>
           Reviews
         </NavLink>

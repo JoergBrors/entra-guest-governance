@@ -75,6 +75,7 @@ export interface ReviewItem {
   decision: ReviewDecision;
   decidedBy?: string | null;
   decidedAt?: string | null;
+  reason?: string | null;
 }
 
 export interface ReviewInstance {
@@ -150,4 +151,54 @@ export interface ScenarioImportResult {
   scenarioId: string | null;
   createdResourceNames: string[];
   errors: string[];
+}
+
+// ---- Excel-Gäste-Import (Phase 4) ------------------------------------------
+
+/** Reservierte Zielschlüssel im Spalten-Mapping — jeder andere Wert wird als freier
+ * ScenarioResourceRule.Fields-Schlüssel behandelt (siehe GuestImportReservedFields,
+ * Backend). */
+export const GUEST_IMPORT_RESERVED_FIELDS = ['Mail', 'DisplayName', 'Workload', 'Szenario'] as const;
+
+export interface GuestImportInspectResult {
+  sheetNames: string[];
+  columnHeaders: string[];
+}
+
+export interface GuestImportColumnMapping {
+  sheetName: string;
+  headerRowIndex: number;
+  dataStartColumnIndex: number;
+  /** Spalten-Offset (0-basiert, ab dataStartColumnIndex) -> Zielschlüssel. */
+  columnToField: Record<number, string>;
+}
+
+export interface GuestImportRowWarning {
+  message: string;
+}
+
+export interface GuestImportForeignWorkloadImpact {
+  workloadId: string;
+  workloadName: string;
+  assignmentId: string;
+  reason: string;
+}
+
+export interface GuestImportRowResult {
+  rowNumber: number;
+  mail: string;
+  displayName: string;
+  isNewGuest: boolean;
+  dataChanged: boolean;
+  matchedRoleNames: string[];
+  warnings: GuestImportRowWarning[];
+  foreignWorkloadImpacts: GuestImportForeignWorkloadImpact[];
+}
+
+export interface GuestImportResult {
+  rows: GuestImportRowResult[];
+  newGuestCount: number;
+  updatedGuestCount: number;
+  assignmentCount: number;
+  warningCount: number;
 }
