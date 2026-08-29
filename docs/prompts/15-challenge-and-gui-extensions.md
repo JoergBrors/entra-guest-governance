@@ -51,6 +51,8 @@ Umgesetzt:
 - Worker-Discovery liest Benutzer und Gruppenmitgliedschaften aus dem Mock.
 - Worker-Deploy kann Gruppen im Mock anlegen.
 - Worker-Grant/Revoke weist Gruppenmitgliedschaften im Mock zu oder entfernt sie.
+- Governance Admin kann den Mock-Entra-Stamm im Development-Portal unter `/dev/mock-entra` einsehen.
+- API stellt im `LOCAL_MOCK` die Development-Endpunkte `/api/dev/mock-entra/users`, `/api/dev/mock-entra/groups` und `/api/dev/mock-entra/memberships` bereit.
 
 Verifikation:
 
