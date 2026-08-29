@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   Title2, Text, Card, Badge, Spinner, Button, Textarea, makeStyles, tokens,
-  MessageBar, MessageBarBody, Tooltip,
+  MessageBar, MessageBarBody, Tooltip, Dialog, DialogTrigger, DialogSurface, DialogTitle,
+  DialogBody, DialogContent, DialogActions,
 } from '@fluentui/react-components';
 import { api } from '../api/client';
 import type { WorkloadScenario, WorkloadResource, ScenarioTemplateDto } from '../types/domain';
@@ -90,6 +91,16 @@ export function ScenariosPage() {
     }
   };
 
+  const handleDelete = async (scenarioId: string) => {
+    setError(null);
+    try {
+      await api.deleteScenario(scenarioId);
+      reload();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   if (!workloadId) return <Text>Kein Workload angegeben.</Text>;
 
   return (
@@ -138,6 +149,28 @@ export function ScenariosPage() {
                 <Button size="small" appearance="secondary" onClick={() => handleExport(s.id)}>
                   Als Template exportieren
                 </Button>
+                <Dialog>
+                  <DialogTrigger disableButtonEnhancement>
+                    <Button size="small" appearance="secondary">Löschen</Button>
+                  </DialogTrigger>
+                  <DialogSurface>
+                    <DialogBody>
+                      <DialogTitle>Szenario löschen?</DialogTitle>
+                      <DialogContent>
+                        "{s.name}" wird endgültig gelöscht. Kann jederzeit per Template neu
+                        importiert werden.
+                      </DialogContent>
+                      <DialogActions>
+                        <DialogTrigger disableButtonEnhancement>
+                          <Button appearance="secondary">Abbrechen</Button>
+                        </DialogTrigger>
+                        <DialogTrigger disableButtonEnhancement>
+                          <Button appearance="primary" onClick={() => handleDelete(s.id)}>Löschen</Button>
+                        </DialogTrigger>
+                      </DialogActions>
+                    </DialogBody>
+                  </DialogSurface>
+                </Dialog>
                 {deployResult[s.id] && <Text size={200}>{deployResult[s.id]}</Text>}
               </div>
             </Card>

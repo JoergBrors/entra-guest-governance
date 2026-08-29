@@ -59,11 +59,26 @@ public sealed class InMemoryWorkloadRepository : IWorkloadRepository
         _store[workload.Id] = workload;
         return Task.CompletedTask;
     }
+
+    public Task DeleteAsync(TenantContext tenant, Guid id, CancellationToken ct)
+    {
+        if (_store.TryGetValue(id, out var w) && tenant.Owns(w.PlatformTenantId))
+        {
+            _store.TryRemove(id, out _);
+        }
+        return Task.CompletedTask;
+    }
 }
 
 public sealed class InMemoryAssignmentRepository : IAssignmentRepository
 {
     private readonly ConcurrentDictionary<Guid, GuestWorkloadAssignment> _store = new();
+
+    public Task<GuestWorkloadAssignment?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct)
+    {
+        _store.TryGetValue(id, out var a);
+        return Task.FromResult(a is not null && tenant.Owns(a.PlatformTenantId) ? a : null);
+    }
 
     public Task<IReadOnlyList<GuestWorkloadAssignment>> ListByGuestAsync(
         TenantContext tenant, Guid guestId, CancellationToken ct) =>
@@ -77,9 +92,23 @@ public sealed class InMemoryAssignmentRepository : IAssignmentRepository
                 && a.Status is AssignmentStatus.Active or AssignmentStatus.Approved or AssignmentStatus.Requested)
                 .ToList());
 
+    public Task<IReadOnlyList<GuestWorkloadAssignment>> ListByWorkloadAsync(
+        TenantContext tenant, Guid workloadId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<GuestWorkloadAssignment>>(
+            _store.Values.Where(a => tenant.Owns(a.PlatformTenantId) && a.WorkloadId == workloadId).ToList());
+
     public Task UpsertAsync(GuestWorkloadAssignment assignment, CancellationToken ct)
     {
         _store[assignment.Id] = assignment;
+        return Task.CompletedTask;
+    }
+
+    public Task DeleteAsync(TenantContext tenant, Guid id, CancellationToken ct)
+    {
+        if (_store.TryGetValue(id, out var a) && tenant.Owns(a.PlatformTenantId))
+        {
+            _store.TryRemove(id, out _);
+        }
         return Task.CompletedTask;
     }
 }
@@ -171,6 +200,15 @@ public sealed class InMemoryWorkloadScenarioRepository : IWorkloadScenarioReposi
     public Task UpsertAsync(WorkloadScenario scenario, CancellationToken ct)
     {
         _store[scenario.Id] = scenario;
+        return Task.CompletedTask;
+    }
+
+    public Task DeleteAsync(TenantContext tenant, Guid id, CancellationToken ct)
+    {
+        if (_store.TryGetValue(id, out var s) && tenant.Owns(s.PlatformTenantId))
+        {
+            _store.TryRemove(id, out _);
+        }
         return Task.CompletedTask;
     }
 }

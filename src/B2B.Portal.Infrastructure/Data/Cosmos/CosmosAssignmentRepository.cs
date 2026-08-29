@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json.Serialization;
 using B2B.Portal.Application.Ports;
 using B2B.Portal.Domain.Entities;
@@ -12,6 +13,20 @@ public sealed class CosmosAssignmentRepository(CosmosClientFactory factory) : IA
 {
     private const string EntityType = nameof(GuestWorkloadAssignment);
     private Container Container => factory.GetContainer("domain");
+
+    public async Task<GuestWorkloadAssignment?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct)
+    {
+        try
+        {
+            var response = await Container.ReadItemAsync<AssignmentDocument>(
+                id.ToString(), new PartitionKey(tenant.PlatformTenantId), cancellationToken: ct);
+            return response.Resource.EntityType == EntityType ? response.Resource.ToEntity() : null;
+        }
+        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
 
     public async Task<IReadOnlyList<GuestWorkloadAssignment>> ListByGuestAsync(
         TenantContext tenant, Guid guestId, CancellationToken ct)
@@ -57,11 +72,44 @@ public sealed class CosmosAssignmentRepository(CosmosClientFactory factory) : IA
         return results;
     }
 
+    public async Task<IReadOnlyList<GuestWorkloadAssignment>> ListByWorkloadAsync(
+        TenantContext tenant, Guid workloadId, CancellationToken ct)
+    {
+        var query = Container.GetItemQueryIterator<AssignmentDocument>(
+            new QueryDefinition(
+                "SELECT * FROM c WHERE c.platformTenantId = @tenant AND c.entityType = @type AND c.workloadId = @workloadId")
+                .WithParameter("@tenant", tenant.PlatformTenantId)
+                .WithParameter("@type", EntityType)
+                .WithParameter("@workloadId", workloadId),
+            requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey(tenant.PlatformTenantId) });
+
+        var results = new List<GuestWorkloadAssignment>();
+        while (query.HasMoreResults)
+        {
+            var page = await query.ReadNextAsync(ct);
+            results.AddRange(page.Select(d => d.ToEntity()));
+        }
+        return results;
+    }
+
     public Task UpsertAsync(GuestWorkloadAssignment assignment, CancellationToken ct) =>
         Container.UpsertItemAsync(
             AssignmentDocument.FromEntity(assignment),
             new PartitionKey(assignment.PlatformTenantId),
             cancellationToken: ct);
+
+    public async Task DeleteAsync(TenantContext tenant, Guid id, CancellationToken ct)
+    {
+        try
+        {
+            await Container.DeleteItemAsync<AssignmentDocument>(
+                id.ToString(), new PartitionKey(tenant.PlatformTenantId), cancellationToken: ct);
+        }
+        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Bereits gelöscht/nie existent — idempotent, kein Fehler.
+        }
+    }
 }
 
 internal sealed class AssignmentDocument

@@ -3,6 +3,7 @@ using B2B.Portal.Application.Commands;
 using B2B.Portal.Application.Ports;
 using B2B.Portal.Application.Scenarios;
 using B2B.Portal.Application.Services;
+using B2B.Portal.Application.Workloads;
 using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
 using B2B.Portal.Domain.Services;
@@ -14,6 +15,9 @@ builder.Configuration.AddDotEnvLocal();
 builder.Configuration.AddEnvironmentVariables();
 
 var mode = builder.Configuration["B2B_MODE"] ?? "LOCAL_MOCK";
+
+builder.Services.ConfigureHttpJsonOptions(o =>
+    o.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
 
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<ITenantContextAccessor, HeaderTenantContextAccessor>();
@@ -27,6 +31,7 @@ builder.Services.AddSingleton<GrantWorkloadRoleCommandHandler>();
 builder.Services.AddSingleton<RevokeWorkloadRoleCommandHandler>();
 builder.Services.AddSingleton<DeployScenarioCommandHandler>();
 builder.Services.AddSingleton<ScenarioImportExportService>();
+builder.Services.AddSingleton<WorkloadManagementService>();
 
 builder.Services.AddCors(o => o.AddDefaultPolicy(p => p
     .WithOrigins(builder.Configuration["WEB_BASE_URL"] ?? "http://localhost:5301")
@@ -62,6 +67,165 @@ app.MapGet("/api/workloads", async (
 {
     var workloads = await repo.ListAsync(tenantCtx.Current, ct);
     return Results.Ok(workloads);
+});
+
+app.MapPut("/api/workloads/{id:guid}", async (
+    Guid id, UpdateWorkloadBody body, ITenantContextAccessor tenantCtx,
+    WorkloadManagementService service, CancellationToken ct) =>
+{
+    try
+    {
+        var workload = await service.UpdateWorkloadAsync(
+            tenantCtx.Current, id, body.Name, body.Owner, actor: "api-user", ct);
+        return Results.Ok(workload);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.NotFound(new { error = ex.Message });
+    }
+});
+
+app.MapDelete("/api/workloads/{id:guid}", async (
+    Guid id, ITenantContextAccessor tenantCtx, WorkloadManagementService service, CancellationToken ct) =>
+{
+    try
+    {
+        await service.DeactivateWorkloadAsync(tenantCtx.Current, id, actor: "api-user", ct);
+        return Results.NoContent();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.NotFound(new { error = ex.Message });
+    }
+});
+
+app.MapPost("/api/workloads/{id:guid}/reactivate", async (
+    Guid id, ITenantContextAccessor tenantCtx, WorkloadManagementService service, CancellationToken ct) =>
+{
+    try
+    {
+        await service.ReactivateWorkloadAsync(tenantCtx.Current, id, actor: "api-user", ct);
+        return Results.NoContent();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.NotFound(new { error = ex.Message });
+    }
+});
+
+app.MapDelete("/api/workloads/{id:guid}/permanent", async (
+    Guid id, ITenantContextAccessor tenantCtx, WorkloadManagementService service, CancellationToken ct) =>
+{
+    try
+    {
+        await service.DeleteWorkloadAsync(tenantCtx.Current, id, actor: "api-user", ct);
+        return Results.NoContent();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Conflict(new { error = ex.Message });
+    }
+});
+
+app.MapGet("/api/workloads/{id:guid}/assignment-counts", async (
+    Guid id, ITenantContextAccessor tenantCtx, WorkloadManagementService service, CancellationToken ct) =>
+{
+    var counts = await service.GetAssignmentCountsAsync(tenantCtx.Current, id, ct);
+    return Results.Ok(counts);
+});
+
+app.MapPost("/api/workloads/{workloadId:guid}/roles", async (
+    Guid workloadId, UpsertWorkloadRoleBody body, ITenantContextAccessor tenantCtx,
+    WorkloadManagementService service, CancellationToken ct) =>
+{
+    try
+    {
+        var role = await service.UpsertRoleAsync(
+            tenantCtx.Current, workloadId, roleId: null, body.Name, body.ResourceMappings, actor: "api-user", ct);
+        return Results.Ok(role);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
+app.MapPut("/api/workloads/{workloadId:guid}/roles/{roleId:guid}", async (
+    Guid workloadId, Guid roleId, UpsertWorkloadRoleBody body, ITenantContextAccessor tenantCtx,
+    WorkloadManagementService service, CancellationToken ct) =>
+{
+    try
+    {
+        var role = await service.UpsertRoleAsync(
+            tenantCtx.Current, workloadId, roleId, body.Name, body.ResourceMappings, actor: "api-user", ct);
+        return Results.Ok(role);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
+app.MapDelete("/api/workloads/{workloadId:guid}/roles/{roleId:guid}", async (
+    Guid workloadId, Guid roleId, ITenantContextAccessor tenantCtx,
+    WorkloadManagementService service, CancellationToken ct) =>
+{
+    try
+    {
+        await service.DeleteRoleAsync(tenantCtx.Current, workloadId, roleId, actor: "api-user", ct);
+        return Results.NoContent();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Conflict(new { error = ex.Message });
+    }
+});
+
+app.MapPost("/api/workloads/{workloadId:guid}/resources", async (
+    Guid workloadId, UpsertWorkloadResourceBody body, ITenantContextAccessor tenantCtx,
+    WorkloadManagementService service, CancellationToken ct) =>
+{
+    try
+    {
+        var resource = await service.UpsertResourceAsync(
+            tenantCtx.Current, workloadId, resourceId: null, body.ResourceType, body.ExternalId, actor: "api-user", ct);
+        return Results.Ok(resource);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
+app.MapPut("/api/workloads/{workloadId:guid}/resources/{resourceId:guid}", async (
+    Guid workloadId, Guid resourceId, UpsertWorkloadResourceBody body, ITenantContextAccessor tenantCtx,
+    WorkloadManagementService service, CancellationToken ct) =>
+{
+    try
+    {
+        var resource = await service.UpsertResourceAsync(
+            tenantCtx.Current, workloadId, resourceId, body.ResourceType, body.ExternalId, actor: "api-user", ct);
+        return Results.Ok(resource);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
+app.MapDelete("/api/workloads/{workloadId:guid}/resources/{resourceId:guid}", async (
+    Guid workloadId, Guid resourceId, ITenantContextAccessor tenantCtx,
+    WorkloadManagementService service, CancellationToken ct) =>
+{
+    try
+    {
+        await service.DeleteResourceAsync(tenantCtx.Current, workloadId, resourceId, actor: "api-user", ct);
+        return Results.NoContent();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Conflict(new { error = ex.Message });
+    }
 });
 
 app.MapGet("/api/reviews", async (
@@ -105,8 +269,7 @@ app.MapPost("/api/assignments/{id:guid}/revoke", async (
     Guid id, ITenantContextAccessor tenantCtx, IAssignmentRepository assignmentRepo,
     RevokeWorkloadRoleCommandHandler handler, CancellationToken ct) =>
 {
-    var assignment = (await assignmentRepo.ListByGuestAsync(tenantCtx.Current, id, ct))
-        .FirstOrDefault();
+    var assignment = await assignmentRepo.GetAsync(tenantCtx.Current, id, ct);
     if (assignment is null)
     {
         return Results.NotFound();
@@ -115,6 +278,13 @@ app.MapPost("/api/assignments/{id:guid}/revoke", async (
     var request = new RevokeWorkloadRoleRequest(tenantCtx.Current.PlatformTenantId, id, Actor: "api-user");
     await handler.HandleAsync(request, assignment, ct);
     return Results.Accepted();
+});
+
+app.MapGet("/api/guest-accounts/{id:guid}/assignments", async (
+    Guid id, ITenantContextAccessor tenantCtx, IAssignmentRepository assignmentRepo, CancellationToken ct) =>
+{
+    var assignments = await assignmentRepo.ListByGuestAsync(tenantCtx.Current, id, ct);
+    return Results.Ok(assignments);
 });
 
 app.MapPost("/api/deletion-candidates/{guestId:guid}/validate", async (
@@ -172,6 +342,21 @@ app.MapPost("/api/scenarios/{id:guid}/deploy", async (
     var request = new DeployScenarioRequest(tenantCtx.Current.PlatformTenantId, id, Actor: "api-user");
     var scenario = await handler.HandleAsync(request, ct);
     return Results.Accepted(value: scenario);
+});
+
+app.MapDelete("/api/scenarios/{id:guid}", async (
+    Guid id, ITenantContextAccessor tenantCtx,
+    ScenarioImportExportService importExportService, CancellationToken ct) =>
+{
+    try
+    {
+        await importExportService.DeleteAsync(tenantCtx.Current, id, actor: "api-user", ct);
+        return Results.NoContent();
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.NotFound(new { error = ex.Message });
+    }
 });
 
 // ---- Dev-Only Seed (nur LOCAL_MOCK) ---------------------------------------
@@ -246,13 +431,9 @@ public sealed record InviteGuestBody(string Mail, string DisplayName, string? Di
 public sealed record AssignmentBody(Guid GuestId, Guid RoleId);
 public sealed record DeletionValidationBody(bool GracePeriodReached);
 public sealed record SeedLargeWorkloadBody(int? GuestCount, string? WorkloadName);
-public sealed record ScenarioConditionBody(string Name, System.Text.Json.JsonElement Expression);
-public sealed record WorkloadScenarioBody(
-    string Name,
-    Guid ExternalOrganizationId,
-    string Environment,
-    List<Guid> ResourceIds,
-    List<ScenarioConditionBody> Conditions);
+public sealed record UpdateWorkloadBody(string Name, string? Owner);
+public sealed record UpsertWorkloadRoleBody(string Name, List<Guid> ResourceMappings);
+public sealed record UpsertWorkloadResourceBody(string ResourceType, string? ExternalId);
 
 /// <summary>
 /// Deterministische, aussagekräftige Demo-Daten für den Dev-Seed-Endpoint

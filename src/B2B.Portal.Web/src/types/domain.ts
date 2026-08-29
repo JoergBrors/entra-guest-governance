@@ -46,6 +46,26 @@ export interface Workload {
   resources: WorkloadResource[];
 }
 
+export interface WorkloadAssignmentCounts {
+  active: number;
+  inactive: number;
+}
+
+export type AssignmentStatus =
+  | 'Requested' | 'Approved' | 'Active' | 'PendingReview' | 'Expired' | 'Revoked' | 'Rejected' | 'Removed';
+
+export interface GuestWorkloadAssignment {
+  id: string;
+  platformTenantId: string;
+  guestId: string;
+  workloadId: string;
+  roleId: string;
+  validFrom: string;
+  validUntil?: string | null;
+  status: AssignmentStatus;
+  updatedAt: string;
+}
+
 export type ReviewDecision = 'Pending' | 'Keep' | 'Remove' | 'Escalated';
 
 export interface ReviewItem {

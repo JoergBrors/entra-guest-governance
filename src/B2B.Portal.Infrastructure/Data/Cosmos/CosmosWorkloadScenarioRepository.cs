@@ -53,6 +53,19 @@ public sealed class CosmosWorkloadScenarioRepository(CosmosClientFactory factory
             WorkloadScenarioDocument.FromEntity(scenario),
             new PartitionKey(scenario.PlatformTenantId),
             cancellationToken: ct);
+
+    public async Task DeleteAsync(TenantContext tenant, Guid id, CancellationToken ct)
+    {
+        try
+        {
+            await Container.DeleteItemAsync<WorkloadScenarioDocument>(
+                id.ToString(), new PartitionKey(tenant.PlatformTenantId), cancellationToken: ct);
+        }
+        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Bereits gelöscht/nie existent — idempotent, kein Fehler.
+        }
+    }
 }
 
 internal sealed class ScenarioResourceRuleDocument
@@ -129,7 +142,7 @@ internal sealed class WorkloadScenarioDocument
             CreatedAt = CreatedAt,
             UpdatedAt = UpdatedAt,
         };
-        scenario.Rules.AddRange(Rules.Select(r => r.ToEntity()));
+        scenario.Rules.AddRange((Rules ?? []).Select(r => r.ToEntity()));
         return scenario;
     }
 }

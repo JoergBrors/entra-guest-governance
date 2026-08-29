@@ -49,6 +49,19 @@ public sealed class CosmosWorkloadRepository(CosmosClientFactory factory) : IWor
             WorkloadDocument.FromEntity(workload),
             new PartitionKey(workload.PlatformTenantId),
             cancellationToken: ct);
+
+    public async Task DeleteAsync(TenantContext tenant, Guid id, CancellationToken ct)
+    {
+        try
+        {
+            await Container.DeleteItemAsync<WorkloadDocument>(
+                id.ToString(), new PartitionKey(tenant.PlatformTenantId), cancellationToken: ct);
+        }
+        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Bereits gelöscht/nie existent — idempotent, kein Fehler.
+        }
+    }
 }
 
 internal sealed class WorkloadRoleDocument

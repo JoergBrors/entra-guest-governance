@@ -1,5 +1,6 @@
 using System.Text.Json;
 using B2B.Portal.Application.Ports;
+using B2B.Portal.Application.Services;
 using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Services;
 using B2B.Portal.Domain.ValueObjects;
@@ -14,11 +15,13 @@ namespace B2B.Portal.Application.Scenarios;
 /// die Namensauflösung/-anlage Application-Ports (IWorkloadRepository,
 /// IWorkloadScenarioRepository) braucht — eine Domain-Platzierung wäre architektonisch
 /// rückwärts (Domain kennt keine Ports). Export macht die Rückwärts-Auflösung für den
-/// JSON-Download desselben Template-Formats.
+/// JSON-Download desselben Template-Formats. DeleteAsync ergänzt das reine Hart-Löschen
+/// eines Szenarios (keine Fremdreferenzen von außen, siehe IWorkloadScenarioRepository).
 /// </summary>
 public sealed class ScenarioImportExportService(
     IWorkloadRepository workloadRepository,
-    IWorkloadScenarioRepository scenarioRepository)
+    IWorkloadScenarioRepository scenarioRepository,
+    AuditService auditService)
 {
     public async Task<ScenarioImportResult> ImportAsync(
         TenantContext tenant, ScenarioTemplateDto template, CancellationToken ct)
@@ -129,5 +132,53 @@ public sealed class ScenarioImportExportService(
         }
 
         return new ScenarioTemplateDto(workload.Name, scenario.Name, ruleDtos);
+    }
+
+    /// <summary>
+    /// Löscht das Szenario hart und entfernt zusätzlich alle WorkloadResources, die
+    /// AUSSCHLIESSLICH von diesem Szenario referenziert wurden (keine WorkloadRole und kein
+    /// anderes Szenario desselben Workload zeigt mehr darauf) — sonst blieben durch den
+    /// Template-Import automatisch angelegte, jetzt verwaiste Ressourcen zurück. Ein
+    /// Szenario-Deploy weist noch keinem einzelnen Gast direkten Zugriff zu (das passiert
+    /// ausschließlich über GuestWorkloadAssignment/GrantWorkloadRoleCommand), daher gibt es
+    /// hier keine Gast-Zuweisungen zu bereinigen.
+    /// </summary>
+    public async Task DeleteAsync(TenantContext tenant, Guid scenarioId, string actor, CancellationToken ct)
+    {
+        var scenario = await scenarioRepository.GetAsync(tenant, scenarioId, ct)
+            ?? throw new InvalidOperationException($"WorkloadScenario {scenarioId} nicht gefunden.");
+
+        var workload = await workloadRepository.GetAsync(tenant, scenario.WorkloadId, ct)
+            ?? throw new InvalidOperationException($"Workload {scenario.WorkloadId} nicht gefunden.");
+
+        var otherScenarios = (await scenarioRepository.ListByWorkloadAsync(tenant, scenario.WorkloadId, ct))
+            .Where(s => s.Id != scenarioId)
+            .ToList();
+        var stillReferencedResourceIds = workload.Roles.SelectMany(r => r.ResourceMappings)
+            .Concat(otherScenarios.SelectMany(s => s.Rules).Select(r => r.ResourceId))
+            .ToHashSet();
+
+        var orphanedResourceIds = scenario.Rules.Select(r => r.ResourceId)
+            .Distinct()
+            .Where(id => !stillReferencedResourceIds.Contains(id))
+            .ToHashSet();
+
+        await scenarioRepository.DeleteAsync(tenant, scenarioId, ct);
+
+        var removedResourceCount = 0;
+        if (orphanedResourceIds.Count > 0)
+        {
+            removedResourceCount = workload.Resources.RemoveAll(r => orphanedResourceIds.Contains(r.Id));
+            if (removedResourceCount > 0)
+            {
+                workload.UpdatedAt = DateTimeOffset.UtcNow;
+                await workloadRepository.UpsertAsync(workload, ct);
+            }
+        }
+
+        await auditService.RecordAsync(
+            tenant.PlatformTenantId, actor, "DeleteScenario", nameof(WorkloadScenario),
+            scenario.Id.ToString(), "Accepted", Guid.NewGuid(),
+            details: $"{removedResourceCount} verwaiste Ressource(n) mitentfernt.", ct: ct);
     }
 }

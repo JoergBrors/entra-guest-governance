@@ -158,7 +158,7 @@ public class ScenarioDeploymentTests
         var clock = new SystemClock();
         var auditService = new AuditService(new InMemoryAuditWriter(), clock);
         var provisioningService = new ProvisioningService(jobRepo, queue, clock);
-        var importExportService = new ScenarioImportExportService(workloadRepo, scenarioRepo);
+        var importExportService = new ScenarioImportExportService(workloadRepo, scenarioRepo, auditService);
 
         // Workload existiert bereits, aber ohne die im Template referenzierten Ressourcen.
         var workload = new Workload { PlatformTenantId = tenant.PlatformTenantId, Name = "SAP-Rollout" };
@@ -203,5 +203,49 @@ public class ScenarioDeploymentTests
         // Nur die Disponent-Regel erfuellt ihre eigene Bedingung -> nur eine Ressource deployt.
         Assert.Single(connector.CreatedResourceNames);
         Assert.Contains("SG-FABRIKAM-DISPONENT", connector.CreatedResourceNames[0]);
+    }
+
+    [Fact]
+    public async Task DeleteScenario_RemovesOrphanedResources_ButKeepsResourcesStillReferenced()
+    {
+        var tenant = TenantContext.Create("scenario-e2e-tenant-delete");
+        var workloadRepo = new InMemoryWorkloadRepository();
+        var scenarioRepo = new InMemoryWorkloadScenarioRepository();
+        var clock = new SystemClock();
+        var auditService = new AuditService(new InMemoryAuditWriter(), clock);
+        var importExportService = new ScenarioImportExportService(workloadRepo, scenarioRepo, auditService);
+
+        var workload = new Workload { PlatformTenantId = tenant.PlatformTenantId, Name = "Delete-Test-Workload" };
+        // Ressource, die zusaetzlich von einer WorkloadRole referenziert wird -> darf beim
+        // Szenario-Loeschen NICHT entfernt werden.
+        var sharedResource = new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "SG-SHARED" };
+        var role = new WorkloadRole { WorkloadId = workload.Id, Name = "Reader" };
+        role.ResourceMappings.Add(sharedResource.Id);
+        workload.Resources.Add(sharedResource);
+        workload.Roles.Add(role);
+        await workloadRepo.UpsertAsync(workload, CancellationToken.None);
+
+        var template = new ScenarioTemplateDto(
+            WorkloadName: "Delete-Test-Workload",
+            ScenarioName: "ToDelete",
+            Rules:
+            [
+                new ScenarioTemplateRuleDto(
+                    ResourceName: "SG-SHARED", ResourceType: "SecurityGroup",
+                    Fields: new Dictionary<string, string>(), Condition: null),
+                new ScenarioTemplateRuleDto(
+                    ResourceName: "SG-ORPHAN-ONLY", ResourceType: "SecurityGroup",
+                    Fields: new Dictionary<string, string>(), Condition: null),
+            ]);
+
+        var importResult = await importExportService.ImportAsync(tenant, template, CancellationToken.None);
+        Assert.NotNull(importResult.ScenarioId);
+
+        await importExportService.DeleteAsync(tenant, importResult.ScenarioId!.Value, "test", CancellationToken.None);
+
+        var reloadedWorkload = await workloadRepo.GetAsync(tenant, workload.Id, CancellationToken.None);
+        Assert.Contains(reloadedWorkload!.Resources, r => r.ExternalId == "SG-SHARED");
+        Assert.DoesNotContain(reloadedWorkload.Resources, r => r.ExternalId == "SG-ORPHAN-ONLY");
+        Assert.Null(await scenarioRepo.GetAsync(tenant, importResult.ScenarioId!.Value, CancellationToken.None));
     }
 }

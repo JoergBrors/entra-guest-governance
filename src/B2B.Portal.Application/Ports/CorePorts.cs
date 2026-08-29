@@ -74,15 +74,37 @@ public interface IWorkloadRepository
     Task<Workload?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
     Task<IReadOnlyList<Workload>> ListAsync(TenantContext tenant, CancellationToken ct);
     Task UpsertAsync(Workload workload, CancellationToken ct);
+
+    /// <summary>Hartes Löschen — nur erlaubt, wenn WorkloadManagementService zuvor geprüft
+    /// hat, dass keine aktiven Assignments mehr existieren.</summary>
+    Task DeleteAsync(TenantContext tenant, Guid id, CancellationToken ct);
 }
 
 public interface IAssignmentRepository
 {
+    Task<GuestWorkloadAssignment?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
+
     Task<IReadOnlyList<GuestWorkloadAssignment>> ListByGuestAsync(
         TenantContext tenant, Guid guestId, CancellationToken ct);
     Task<IReadOnlyList<GuestWorkloadAssignment>> ListActiveByGuestAsync(
         TenantContext tenant, Guid guestId, CancellationToken ct);
+
+    /// <summary>
+    /// Alle Assignments eines Workload — Grundlage für Konsistenzprüfungen beim Löschen
+    /// einer WorkloadRole/WorkloadResource/eines ganzen Workload (siehe
+    /// WorkloadManagementService): eine Rolle/ein Workload mit aktiven Assignments darf
+    /// nicht gelöscht werden, sonst hinge die Zuweisung an einer nicht mehr existierenden
+    /// Rolle/einem nicht mehr existierenden Workload.
+    /// </summary>
+    Task<IReadOnlyList<GuestWorkloadAssignment>> ListByWorkloadAsync(
+        TenantContext tenant, Guid workloadId, CancellationToken ct);
+
     Task UpsertAsync(GuestWorkloadAssignment assignment, CancellationToken ct);
+
+    /// <summary>Hartes Löschen — nur für die Bereinigung historischer Assignments beim
+    /// Hart-Löschen eines Workload (siehe WorkloadManagementService.DeleteWorkloadAsync),
+    /// niemals für aktive Assignments (dafür existiert der Revoke-Fluss).</summary>
+    Task DeleteAsync(TenantContext tenant, Guid id, CancellationToken ct);
 }
 
 public interface IReviewRepository
@@ -113,6 +135,11 @@ public interface IWorkloadScenarioRepository
     Task<IReadOnlyList<WorkloadScenario>> ListByWorkloadAsync(
         TenantContext tenant, Guid workloadId, CancellationToken ct);
     Task UpsertAsync(WorkloadScenario scenario, CancellationToken ct);
+
+    /// <summary>Hartes Löschen — Szenarien haben keine Fremdreferenzen (keine Assignments
+    /// hängen direkt an einem Szenario), daher unproblematisch und jederzeit per
+    /// Template-Import wiederherstellbar.</summary>
+    Task DeleteAsync(TenantContext tenant, Guid id, CancellationToken ct);
 }
 
 public interface IExternalOrganizationRepository
