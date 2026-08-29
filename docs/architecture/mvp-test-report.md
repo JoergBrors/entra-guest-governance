@@ -171,9 +171,35 @@ automatisiert herstellen".
    Entra-ID-Objekten liegt).
 4. Exception-Middleware für konsistente 401/403-Antworten ergänzen.
 
+## 9. Erweiterung 2026-08-29: Challenge E01-E08 und GUI Themes
+
+Ausgefuehrte Checks:
+
+| Check | Ergebnis |
+| --- | --- |
+| `dotnet build -c Debug` | erfolgreich, 0 Warnungen, 0 Fehler |
+| `dotnet test -c Debug` | erfolgreich, 39 Tests bestanden |
+| `npm run build` | erfolgreich, Vite Build erzeugt `dist` |
+| `npm run test -- --run` | erfolgreich, 5 Tests bestanden |
+
+Ergaenzte Tests:
+
+- API Smoke: `GovernanceAdmin` darf Guest Pool lesen.
+- API Smoke: normaler `User` erhaelt fuer globale Guest-Liste `403`.
+- API Smoke: unbekannte Theme ID faellt auf `corporate-vibrant` zurueck.
+- Rollenfakten: Workload Owner kann nur eigenen Workload verwalten.
+- Rollenfakten: Scenario Manager kann nur im konfigurierten Workload-Scope agieren.
+- Theme Loader: gueltige Themes, sicherer Default, Validierung.
+
+Nicht als produktiv verifiziert:
+
+- Produktive Entra-Token-/Claim-Ableitung: `integration pending`.
+- Produktive Tenant-Theme-Zuordnung: `integration pending`.
+- Echte Graph Directory Integration: `integration pending`.
+
 ## Gesamtstatus
 
 **PASS WITH PENDING INTEGRATIONS** — Frontend und Backend bauen und testen vollständig
-grün (31/31 .NET-Tests, 2/2 Frontend-Tests). Offen bleiben ausschließlich die bewusst
+grün (39/39 .NET-Tests, 5/5 Frontend-Tests). Offen bleiben ausschließlich die bewusst
 nicht simulierten externen Integrationen (echter Graph-Write, echter Mail-Versand,
 Token-Validierung) sowie die in Abschnitt 7/8 genannten funktionalen Lücken.

@@ -42,9 +42,40 @@ public class ApiSmokeTests(WebApplicationFactory<Program> factory) : IClassFixtu
     {
         var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-smoke-test");
+        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "admin@platform.example");
+        client.DefaultRequestHeaders.Add("X-Portal-Roles", "GovernanceAdmin");
 
         var response = await client.GetAsync("/api/guest-accounts");
 
         response.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    public async Task GuestAccounts_NormalUser_ReturnsForbidden()
+    {
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-smoke-test");
+        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "guest@tenant.example");
+        client.DefaultRequestHeaders.Add("X-Portal-Roles", "User");
+
+        var response = await client.GetAsync("/api/guest-accounts");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task UiConfiguration_UnknownTheme_FallsBackToDefault()
+    {
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-smoke-test");
+        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "admin@platform.example");
+        client.DefaultRequestHeaders.Add("X-Portal-Roles", "GovernanceAdmin");
+        client.DefaultRequestHeaders.Add("X-Portal-Theme-Id", "unknown-theme");
+
+        var response = await client.GetAsync("/api/ui/configuration");
+
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("corporate-vibrant", body);
     }
 }

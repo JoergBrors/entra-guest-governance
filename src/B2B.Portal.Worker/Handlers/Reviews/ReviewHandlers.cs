@@ -60,6 +60,7 @@ public sealed class StartReviewHandler(
 public sealed class ApplyReviewDecisionHandler(
     IReviewRepository reviewRepository,
     IJobQueue jobQueue,
+    B2B.Portal.Application.Services.AuditService auditService,
     ILogger<ApplyReviewDecisionHandler> logger) : IJobHandler
 {
     public string JobType => JobTypes.ApplyReviewDecision;
@@ -80,6 +81,9 @@ public sealed class ApplyReviewDecisionHandler(
         }
 
         item.Decision = decision;
+        item.DecidedBy = job.Payload.TryGetProperty("Actor", out var actorValue)
+            ? actorValue.GetString()
+            : "system:review-handler";
         item.DecidedAt = DateTimeOffset.UtcNow;
         await reviewRepository.UpsertAsync(instance, ct);
 
@@ -92,6 +96,17 @@ public sealed class ApplyReviewDecisionHandler(
                 desiredStateHash: $"revoke-{item.AssignmentId}", payload, job.CorrelationId);
             await jobQueue.EnqueueAsync(revokeJob, ct);
         }
+
+        await auditService.RecordAsync(
+            job.PlatformTenantId,
+            item.DecidedBy ?? "system:review-handler",
+            "ApplyReviewDecision",
+            nameof(ReviewItem),
+            item.Id.ToString(),
+            decision.ToString(),
+            job.CorrelationId,
+            details: $"ReviewInstance={instance.Id};Assignment={item.AssignmentId}",
+            ct: ct);
 
         logger.LogInformation(
             "ReviewItem {ReviewItemId} entschieden: {Decision}. CorrelationId={CorrelationId}",

@@ -1,3 +1,5 @@
+using System.Text.Json;
+using B2B.Portal.Api.Auth;
 using B2B.Portal.Api.Tenancy;
 using B2B.Portal.Application.Commands;
 using B2B.Portal.Application.Import;
@@ -22,6 +24,7 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<ITenantContextAccessor, HeaderTenantContextAccessor>();
+builder.Services.AddSingleton<IPortalUserContextAccessor, HeaderPortalUserContextAccessor>();
 builder.Services.AddB2BInfrastructure(builder.Configuration);
 
 builder.Services.AddSingleton<AuditService>();
@@ -49,36 +52,178 @@ Console.WriteLine($"[B2B.Portal.Api] Startmodus: {mode}");
 // ---- Health --------------------------------------------------------------
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", mode }));
 
+app.MapGet("/api/ui/configuration", (IPortalUserContextAccessor userCtx, IConfiguration configuration) =>
+{
+    var themeId = configuration["DEFAULT_PORTAL_THEME_ID"] ?? "corporate-vibrant";
+    if (mode == "LOCAL_MOCK")
+    {
+        var headerThemeId = app.Services.GetRequiredService<IHttpContextAccessor>()
+            .HttpContext?.Request.Headers["X-Portal-Theme-Id"].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(headerThemeId))
+        {
+            themeId = headerThemeId;
+        }
+    }
+
+    var allowedThemeIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "corporate-vibrant",
+        "functional-minimal",
+    };
+
+    if (!allowedThemeIds.Contains(themeId))
+    {
+        themeId = "corporate-vibrant";
+    }
+
+    var user = userCtx.Current;
+    return Results.Ok(new
+    {
+        platformTenantId = app.Services.GetRequiredService<IHttpContextAccessor>()
+            .HttpContext?.Request.Headers["X-Platform-Tenant-Id"].FirstOrDefault(),
+        themeId,
+        branding = new { productName = "B2B Guest Governance Portal" },
+        user = new { user.Mail, roles = user.Roles },
+    });
+});
+
 // ---- Queries (Blueprint 16.1) --------------------------------------------
 app.MapGet("/api/guest-accounts", async (
-    ITenantContextAccessor tenantCtx, IGuestAccountRepository repo, CancellationToken ct) =>
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IGuestAccountRepository repo, CancellationToken ct) =>
 {
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
     var guests = await repo.ListAsync(tenantCtx.Current, ct);
     return Results.Ok(guests);
 });
 
 app.MapGet("/api/guest-accounts/{id:guid}", async (
-    Guid id, ITenantContextAccessor tenantCtx, IGuestAccountRepository repo, CancellationToken ct) =>
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IGuestAccountRepository repo, CancellationToken ct) =>
 {
     var guest = await repo.GetAsync(tenantCtx.Current, id, ct);
-    return guest is null ? Results.NotFound() : Results.Ok(guest);
+    if (guest is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (!userCtx.Current.IsGovernanceAdmin && !string.Equals(userCtx.Current.Mail, guest.Mail, StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.StatusCode(403);
+    }
+
+    return Results.Ok(guest);
+});
+
+app.MapGet("/api/me/workloads", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IGuestAccountRepository guestRepo, IAssignmentRepository assignmentRepo, IWorkloadRepository workloadRepo,
+    CancellationToken ct) =>
+{
+    var guest = await guestRepo.GetByMailAsync(tenantCtx.Current, userCtx.Current.Mail, ct);
+    if (guest is null)
+    {
+        return Results.Ok(Array.Empty<Workload>());
+    }
+
+    var assignments = await assignmentRepo.ListActiveByGuestAsync(tenantCtx.Current, guest.Id, ct);
+    var result = new List<Workload>();
+    foreach (var assignment in assignments)
+    {
+        var workload = await workloadRepo.GetAsync(tenantCtx.Current, assignment.WorkloadId, ct);
+        if (workload is not null)
+        {
+            result.Add(ProjectWorkloadForUser(workload, assignment.RoleId));
+        }
+    }
+
+    return Results.Ok(result);
+});
+
+app.MapGet("/api/me/navigation", (IPortalUserContextAccessor userCtx) =>
+{
+    var user = userCtx.Current;
+    var items = new List<string> { "Start", "Meine Workloads", "Meine Zugriffe", "Anträge", "Profil" };
+    if (user.CanReview)
+    {
+        items.Insert(4, "Meine Reviews");
+    }
+    if (user.IsGovernanceAdmin)
+    {
+        items.AddRange(["Übersicht", "Guest Pool", "Workloads", "Einladungen", "Reviews", "Zugriffsanträge", "Compliance", "Audit", "Ressourcen / Discovery", "Jobs", "Templates", "Konfiguration"]);
+    }
+    else if (user.HasRole(PortalRoles.WorkloadOwner) || user.HasRole(PortalRoles.ScenarioManager))
+    {
+        items.Add("Workloads");
+    }
+
+    return Results.Ok(new { items });
+});
+
+app.MapGet("/api/workloads/{id:guid}", async (
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, IAssignmentRepository assignmentRepo, IGuestAccountRepository guestRepo,
+    CancellationToken ct) =>
+{
+    var workload = await workloadRepo.GetAsync(tenantCtx.Current, id, ct);
+    if (workload is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (userCtx.Current.IsGovernanceAdmin || userCtx.Current.CanManageWorkload(workload.Owner)
+        || userCtx.Current.ScenarioManagerWorkloadIds.Contains(workload.Id))
+    {
+        return Results.Ok(workload);
+    }
+
+    var guest = await guestRepo.GetByMailAsync(tenantCtx.Current, userCtx.Current.Mail, ct);
+    if (guest is null)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var assignments = await assignmentRepo.ListActiveByGuestAsync(tenantCtx.Current, guest.Id, ct);
+    return assignments.Any(a => a.WorkloadId == workload.Id)
+        ? Results.Ok(ProjectWorkloadForUser(workload, assignments.First(a => a.WorkloadId == workload.Id).RoleId))
+        : Results.StatusCode(403);
 });
 
 app.MapGet("/api/workloads", async (
-    ITenantContextAccessor tenantCtx, IWorkloadRepository repo, CancellationToken ct) =>
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IWorkloadRepository repo, CancellationToken ct) =>
 {
     var workloads = await repo.ListAsync(tenantCtx.Current, ct);
-    return Results.Ok(workloads);
+    if (userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.Ok(workloads);
+    }
+
+    var scoped = workloads
+        .Where(w => userCtx.Current.CanManageWorkload(w.Owner) || userCtx.Current.ScenarioManagerWorkloadIds.Contains(w.Id))
+        .ToList();
+    return Results.Ok(scoped);
 });
 
 app.MapPut("/api/workloads/{id:guid}", async (
-    Guid id, UpdateWorkloadBody body, ITenantContextAccessor tenantCtx,
-    WorkloadManagementService service, CancellationToken ct) =>
+    Guid id, UpdateWorkloadBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
 {
     try
     {
+        var existing = await workloadRepo.GetAsync(tenantCtx.Current, id, ct);
+        if (existing is null)
+        {
+            return Results.NotFound(new { error = $"Workload {id} nicht gefunden." });
+        }
+        if (!userCtx.Current.CanManageWorkload(existing.Owner))
+        {
+            return Results.StatusCode(403);
+        }
+
         var workload = await service.UpdateWorkloadAsync(
-            tenantCtx.Current, id, body.Name, body.Owner, actor: "api-user", ct);
+            tenantCtx.Current, id, body.Name, body.Owner, actor: userCtx.Current.Mail, ct);
         return Results.Ok(workload);
     }
     catch (InvalidOperationException ex)
@@ -88,11 +233,22 @@ app.MapPut("/api/workloads/{id:guid}", async (
 });
 
 app.MapDelete("/api/workloads/{id:guid}", async (
-    Guid id, ITenantContextAccessor tenantCtx, WorkloadManagementService service, CancellationToken ct) =>
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
 {
     try
     {
-        await service.DeactivateWorkloadAsync(tenantCtx.Current, id, actor: "api-user", ct);
+        var existing = await workloadRepo.GetAsync(tenantCtx.Current, id, ct);
+        if (existing is null)
+        {
+            return Results.NotFound(new { error = $"Workload {id} nicht gefunden." });
+        }
+        if (!userCtx.Current.CanManageWorkload(existing.Owner))
+        {
+            return Results.StatusCode(403);
+        }
+
+        await service.DeactivateWorkloadAsync(tenantCtx.Current, id, actor: userCtx.Current.Mail, ct);
         return Results.NoContent();
     }
     catch (InvalidOperationException ex)
@@ -102,11 +258,22 @@ app.MapDelete("/api/workloads/{id:guid}", async (
 });
 
 app.MapPost("/api/workloads/{id:guid}/reactivate", async (
-    Guid id, ITenantContextAccessor tenantCtx, WorkloadManagementService service, CancellationToken ct) =>
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
 {
     try
     {
-        await service.ReactivateWorkloadAsync(tenantCtx.Current, id, actor: "api-user", ct);
+        var existing = await workloadRepo.GetAsync(tenantCtx.Current, id, ct);
+        if (existing is null)
+        {
+            return Results.NotFound(new { error = $"Workload {id} nicht gefunden." });
+        }
+        if (!userCtx.Current.CanManageWorkload(existing.Owner))
+        {
+            return Results.StatusCode(403);
+        }
+
+        await service.ReactivateWorkloadAsync(tenantCtx.Current, id, actor: userCtx.Current.Mail, ct);
         return Results.NoContent();
     }
     catch (InvalidOperationException ex)
@@ -116,11 +283,22 @@ app.MapPost("/api/workloads/{id:guid}/reactivate", async (
 });
 
 app.MapDelete("/api/workloads/{id:guid}/permanent", async (
-    Guid id, ITenantContextAccessor tenantCtx, WorkloadManagementService service, CancellationToken ct) =>
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
 {
     try
     {
-        await service.DeleteWorkloadAsync(tenantCtx.Current, id, actor: "api-user", ct);
+        var existing = await workloadRepo.GetAsync(tenantCtx.Current, id, ct);
+        if (existing is null)
+        {
+            return Results.NotFound(new { error = $"Workload {id} nicht gefunden." });
+        }
+        if (!userCtx.Current.CanManageWorkload(existing.Owner))
+        {
+            return Results.StatusCode(403);
+        }
+
+        await service.DeleteWorkloadAsync(tenantCtx.Current, id, actor: userCtx.Current.Mail, ct);
         return Results.NoContent();
     }
     catch (InvalidOperationException ex)
@@ -137,13 +315,17 @@ app.MapGet("/api/workloads/{id:guid}/assignment-counts", async (
 });
 
 app.MapPost("/api/workloads/{workloadId:guid}/roles", async (
-    Guid workloadId, UpsertWorkloadRoleBody body, ITenantContextAccessor tenantCtx,
-    WorkloadManagementService service, CancellationToken ct) =>
+    Guid workloadId, UpsertWorkloadRoleBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
 {
     try
     {
+        var workload = await workloadRepo.GetAsync(tenantCtx.Current, workloadId, ct);
+        if (workload is null) return Results.NotFound(new { error = $"Workload {workloadId} nicht gefunden." });
+        if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
+
         var role = await service.UpsertRoleAsync(
-            tenantCtx.Current, workloadId, roleId: null, body.Name, body.ResourceMappings, actor: "api-user", ct);
+            tenantCtx.Current, workloadId, roleId: null, body.Name, body.ResourceMappings, actor: userCtx.Current.Mail, ct);
         return Results.Ok(role);
     }
     catch (InvalidOperationException ex)
@@ -153,13 +335,17 @@ app.MapPost("/api/workloads/{workloadId:guid}/roles", async (
 });
 
 app.MapPut("/api/workloads/{workloadId:guid}/roles/{roleId:guid}", async (
-    Guid workloadId, Guid roleId, UpsertWorkloadRoleBody body, ITenantContextAccessor tenantCtx,
-    WorkloadManagementService service, CancellationToken ct) =>
+    Guid workloadId, Guid roleId, UpsertWorkloadRoleBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
 {
     try
     {
+        var workload = await workloadRepo.GetAsync(tenantCtx.Current, workloadId, ct);
+        if (workload is null) return Results.NotFound(new { error = $"Workload {workloadId} nicht gefunden." });
+        if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
+
         var role = await service.UpsertRoleAsync(
-            tenantCtx.Current, workloadId, roleId, body.Name, body.ResourceMappings, actor: "api-user", ct);
+            tenantCtx.Current, workloadId, roleId, body.Name, body.ResourceMappings, actor: userCtx.Current.Mail, ct);
         return Results.Ok(role);
     }
     catch (InvalidOperationException ex)
@@ -169,12 +355,16 @@ app.MapPut("/api/workloads/{workloadId:guid}/roles/{roleId:guid}", async (
 });
 
 app.MapDelete("/api/workloads/{workloadId:guid}/roles/{roleId:guid}", async (
-    Guid workloadId, Guid roleId, ITenantContextAccessor tenantCtx,
-    WorkloadManagementService service, CancellationToken ct) =>
+    Guid workloadId, Guid roleId, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
 {
     try
     {
-        await service.DeleteRoleAsync(tenantCtx.Current, workloadId, roleId, actor: "api-user", ct);
+        var workload = await workloadRepo.GetAsync(tenantCtx.Current, workloadId, ct);
+        if (workload is null) return Results.NotFound(new { error = $"Workload {workloadId} nicht gefunden." });
+        if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
+
+        await service.DeleteRoleAsync(tenantCtx.Current, workloadId, roleId, actor: userCtx.Current.Mail, ct);
         return Results.NoContent();
     }
     catch (InvalidOperationException ex)
@@ -184,13 +374,17 @@ app.MapDelete("/api/workloads/{workloadId:guid}/roles/{roleId:guid}", async (
 });
 
 app.MapPost("/api/workloads/{workloadId:guid}/resources", async (
-    Guid workloadId, UpsertWorkloadResourceBody body, ITenantContextAccessor tenantCtx,
-    WorkloadManagementService service, CancellationToken ct) =>
+    Guid workloadId, UpsertWorkloadResourceBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
 {
     try
     {
+        var workload = await workloadRepo.GetAsync(tenantCtx.Current, workloadId, ct);
+        if (workload is null) return Results.NotFound(new { error = $"Workload {workloadId} nicht gefunden." });
+        if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
+
         var resource = await service.UpsertResourceAsync(
-            tenantCtx.Current, workloadId, resourceId: null, body.ResourceType, body.ExternalId, actor: "api-user", ct);
+            tenantCtx.Current, workloadId, resourceId: null, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct);
         return Results.Ok(resource);
     }
     catch (InvalidOperationException ex)
@@ -200,13 +394,17 @@ app.MapPost("/api/workloads/{workloadId:guid}/resources", async (
 });
 
 app.MapPut("/api/workloads/{workloadId:guid}/resources/{resourceId:guid}", async (
-    Guid workloadId, Guid resourceId, UpsertWorkloadResourceBody body, ITenantContextAccessor tenantCtx,
-    WorkloadManagementService service, CancellationToken ct) =>
+    Guid workloadId, Guid resourceId, UpsertWorkloadResourceBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
 {
     try
     {
+        var workload = await workloadRepo.GetAsync(tenantCtx.Current, workloadId, ct);
+        if (workload is null) return Results.NotFound(new { error = $"Workload {workloadId} nicht gefunden." });
+        if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
+
         var resource = await service.UpsertResourceAsync(
-            tenantCtx.Current, workloadId, resourceId, body.ResourceType, body.ExternalId, actor: "api-user", ct);
+            tenantCtx.Current, workloadId, resourceId, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct);
         return Results.Ok(resource);
     }
     catch (InvalidOperationException ex)
@@ -216,12 +414,16 @@ app.MapPut("/api/workloads/{workloadId:guid}/resources/{resourceId:guid}", async
 });
 
 app.MapDelete("/api/workloads/{workloadId:guid}/resources/{resourceId:guid}", async (
-    Guid workloadId, Guid resourceId, ITenantContextAccessor tenantCtx,
-    WorkloadManagementService service, CancellationToken ct) =>
+    Guid workloadId, Guid resourceId, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
 {
     try
     {
-        await service.DeleteResourceAsync(tenantCtx.Current, workloadId, resourceId, actor: "api-user", ct);
+        var workload = await workloadRepo.GetAsync(tenantCtx.Current, workloadId, ct);
+        if (workload is null) return Results.NotFound(new { error = $"Workload {workloadId} nicht gefunden." });
+        if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
+
+        await service.DeleteResourceAsync(tenantCtx.Current, workloadId, resourceId, actor: userCtx.Current.Mail, ct);
         return Results.NoContent();
     }
     catch (InvalidOperationException ex)
@@ -231,44 +433,102 @@ app.MapDelete("/api/workloads/{workloadId:guid}/resources/{resourceId:guid}", as
 });
 
 app.MapGet("/api/reviews", async (
-    ITenantContextAccessor tenantCtx, IReviewRepository repo, CancellationToken ct) =>
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IReviewRepository repo, CancellationToken ct) =>
 {
+    if (!userCtx.Current.CanReview)
+    {
+        return Results.StatusCode(403);
+    }
+
     var reviews = await repo.ListOpenAsync(tenantCtx.Current, ct);
     return Results.Ok(reviews);
 });
 
-app.MapGet("/api/audit-events", async (
-    ITenantContextAccessor tenantCtx, IAuditWriter auditWriter, CancellationToken ct) =>
+app.MapPost("/api/reviews/{reviewInstanceId:guid}/items/{reviewItemId:guid}/decision", async (
+    Guid reviewInstanceId, Guid reviewItemId, ReviewDecisionBody body,
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IReviewRepository reviewRepo, ProvisioningService provisioningService, CancellationToken ct) =>
 {
+    if (!userCtx.Current.CanReview)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var review = await reviewRepo.GetAsync(tenantCtx.Current, reviewInstanceId, ct);
+    if (review is null || review.Items.All(i => i.Id != reviewItemId))
+    {
+        return Results.NotFound();
+    }
+
+    var decision = Enum.Parse<ReviewDecision>(body.Decision, ignoreCase: true);
+    var hash = DesiredStateHasher.Hash("ApplyReviewDecision", reviewInstanceId.ToString(), reviewItemId.ToString(), decision.ToString());
+    await provisioningService.EnqueueJobAsync(
+        tenantCtx.Current.PlatformTenantId,
+        tenantCtx.Current.DirectoryTenantId,
+        JobTypes.ApplyReviewDecision,
+        nameof(ReviewInstance),
+        reviewInstanceId.ToString(),
+        hash,
+        new { ReviewItemId = reviewItemId, Decision = decision.ToString(), Actor = userCtx.Current.Mail },
+        Guid.NewGuid(),
+        ct);
+
+    return Results.Accepted();
+});
+
+app.MapGet("/api/audit-events", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IAuditWriter auditWriter, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
     var events = await auditWriter.QueryAsync(tenantCtx.Current, take: 100, ct);
     return Results.Ok(events);
 });
 
 // ---- Commands (Blueprint 16.1) -------------------------------------------
 app.MapPost("/api/guests/invite", async (
-    InviteGuestBody body, ITenantContextAccessor tenantCtx, InviteGuestCommandHandler handler,
+    InviteGuestBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, InviteGuestCommandHandler handler,
     CancellationToken ct) =>
 {
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
     var request = new InviteGuestRequest(
         tenantCtx.Current.PlatformTenantId,
         tenantCtx.Current.DirectoryTenantId ?? body.DirectoryTenantId ?? string.Empty,
-        body.Mail, body.DisplayName, Actor: "api-user");
+        body.Mail, body.DisplayName, Actor: userCtx.Current.Mail);
     var guest = await handler.HandleAsync(request, ct);
     return Results.Ok(guest);
 });
 
 app.MapPost("/api/workloads/{workloadId:guid}/assignments", async (
-    Guid workloadId, AssignmentBody body, ITenantContextAccessor tenantCtx,
-    GrantWorkloadRoleCommandHandler handler, CancellationToken ct) =>
+    Guid workloadId, AssignmentBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, GrantWorkloadRoleCommandHandler handler, CancellationToken ct) =>
 {
+    var workload = await workloadRepo.GetAsync(tenantCtx.Current, workloadId, ct);
+    if (workload is null)
+    {
+        return Results.NotFound(new { error = $"Workload {workloadId} nicht gefunden." });
+    }
+    if (!userCtx.Current.CanManageWorkload(workload.Owner))
+    {
+        return Results.StatusCode(403);
+    }
+
     var request = new GrantWorkloadRoleRequest(
-        tenantCtx.Current.PlatformTenantId, body.GuestId, workloadId, body.RoleId, Actor: "api-user");
+        tenantCtx.Current.PlatformTenantId, body.GuestId, workloadId, body.RoleId, Actor: userCtx.Current.Mail);
     var assignment = await handler.HandleAsync(request, ct);
     return Results.Ok(assignment);
 });
 
 app.MapPost("/api/assignments/{id:guid}/revoke", async (
-    Guid id, ITenantContextAccessor tenantCtx, IAssignmentRepository assignmentRepo,
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IAssignmentRepository assignmentRepo, IWorkloadRepository workloadRepo,
     RevokeWorkloadRoleCommandHandler handler, CancellationToken ct) =>
 {
     var assignment = await assignmentRepo.GetAsync(tenantCtx.Current, id, ct);
@@ -276,23 +536,48 @@ app.MapPost("/api/assignments/{id:guid}/revoke", async (
     {
         return Results.NotFound();
     }
+    var workload = await workloadRepo.GetAsync(tenantCtx.Current, assignment.WorkloadId, ct);
+    if (workload is null)
+    {
+        return Results.NotFound();
+    }
+    if (!userCtx.Current.CanManageWorkload(workload.Owner) && !userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
 
-    var request = new RevokeWorkloadRoleRequest(tenantCtx.Current.PlatformTenantId, id, Actor: "api-user");
+    var request = new RevokeWorkloadRoleRequest(tenantCtx.Current.PlatformTenantId, id, Actor: userCtx.Current.Mail);
     await handler.HandleAsync(request, assignment, ct);
     return Results.Accepted();
 });
 
 app.MapGet("/api/guest-accounts/{id:guid}/assignments", async (
-    Guid id, ITenantContextAccessor tenantCtx, IAssignmentRepository assignmentRepo, CancellationToken ct) =>
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IGuestAccountRepository guestRepo, IAssignmentRepository assignmentRepo, CancellationToken ct) =>
 {
+    var guest = await guestRepo.GetAsync(tenantCtx.Current, id, ct);
+    if (guest is null)
+    {
+        return Results.NotFound();
+    }
+    if (!userCtx.Current.IsGovernanceAdmin && !string.Equals(userCtx.Current.Mail, guest.Mail, StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.StatusCode(403);
+    }
+
     var assignments = await assignmentRepo.ListByGuestAsync(tenantCtx.Current, id, ct);
     return Results.Ok(assignments);
 });
 
 app.MapPost("/api/deletion-candidates/{guestId:guid}/validate", async (
-    Guid guestId, DeletionValidationBody? body, ITenantContextAccessor tenantCtx,
+    Guid guestId, DeletionValidationBody? body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
     LifecycleService lifecycleService, CancellationToken ct) =>
 {
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
     var gracePeriodReached = body?.GracePeriodReached ?? false;
     var evaluation = await lifecycleService.EvaluateDeletionAsync(
         tenantCtx.Current.PlatformTenantId, guestId, gracePeriodReached, Guid.NewGuid(), ct);
@@ -301,16 +586,43 @@ app.MapPost("/api/deletion-candidates/{guestId:guid}/validate", async (
 
 // ---- Workload-Szenarien -----------------------------------------------------
 app.MapGet("/api/workloads/{workloadId:guid}/scenarios", async (
-    Guid workloadId, ITenantContextAccessor tenantCtx, IWorkloadScenarioRepository repo, CancellationToken ct) =>
+    Guid workloadId, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, IWorkloadScenarioRepository repo, CancellationToken ct) =>
 {
+    var workload = await workloadRepo.GetAsync(tenantCtx.Current, workloadId, ct);
+    if (workload is null)
+    {
+        return Results.NotFound();
+    }
+    if (!userCtx.Current.CanManageWorkload(workload.Owner) &&
+        !userCtx.Current.ScenarioManagerWorkloadIds.Contains(workloadId) &&
+        !userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
     var scenarios = await repo.ListByWorkloadAsync(tenantCtx.Current, workloadId, ct);
     return Results.Ok(scenarios);
 });
 
 app.MapPost("/api/scenarios/import", async (
-    ScenarioTemplateDto body, ITenantContextAccessor tenantCtx,
+    ScenarioTemplateDto body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo,
     ScenarioImportExportService importExportService, CancellationToken ct) =>
 {
+    var workloads = await workloadRepo.ListAsync(tenantCtx.Current, ct);
+    var targetWorkload = workloads.FirstOrDefault(w => string.Equals(w.Name, body.WorkloadName, StringComparison.OrdinalIgnoreCase));
+    if (targetWorkload is not null &&
+        !userCtx.Current.CanManageWorkload(targetWorkload.Owner) &&
+        !userCtx.Current.ScenarioManagerWorkloadIds.Contains(targetWorkload.Id))
+    {
+        return Results.StatusCode(403);
+    }
+    if (targetWorkload is null && !userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
     foreach (var rule in body.Rules)
     {
         if (rule.Condition is System.Text.Json.JsonElement condition)
@@ -331,28 +643,77 @@ app.MapPost("/api/scenarios/import", async (
 });
 
 app.MapGet("/api/scenarios/{id:guid}/export", async (
-    Guid id, ITenantContextAccessor tenantCtx,
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadScenarioRepository scenarioRepo, IWorkloadRepository workloadRepo,
     ScenarioImportExportService importExportService, CancellationToken ct) =>
 {
+    var scenario = await scenarioRepo.GetAsync(tenantCtx.Current, id, ct);
+    if (scenario is null)
+    {
+        return Results.NotFound();
+    }
+    var workload = await workloadRepo.GetAsync(tenantCtx.Current, scenario.WorkloadId, ct);
+    if (workload is null)
+    {
+        return Results.NotFound();
+    }
+    if (!userCtx.Current.CanManageScenario(workload.Id, workload.Owner, scenario.ScenarioManagers))
+    {
+        return Results.StatusCode(403);
+    }
+
     var template = await importExportService.ExportAsync(tenantCtx.Current, id, ct);
     return Results.Ok(template);
 });
 
 app.MapPost("/api/scenarios/{id:guid}/deploy", async (
-    Guid id, ITenantContextAccessor tenantCtx, DeployScenarioCommandHandler handler, CancellationToken ct) =>
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadScenarioRepository scenarioRepo, IWorkloadRepository workloadRepo,
+    DeployScenarioCommandHandler handler, CancellationToken ct) =>
 {
-    var request = new DeployScenarioRequest(tenantCtx.Current.PlatformTenantId, id, Actor: "api-user");
-    var scenario = await handler.HandleAsync(request, ct);
-    return Results.Accepted(value: scenario);
+    var scenario = await scenarioRepo.GetAsync(tenantCtx.Current, id, ct);
+    if (scenario is null)
+    {
+        return Results.NotFound();
+    }
+    var workload = await workloadRepo.GetAsync(tenantCtx.Current, scenario.WorkloadId, ct);
+    if (workload is null)
+    {
+        return Results.NotFound();
+    }
+    if (!userCtx.Current.CanManageScenario(workload.Id, workload.Owner, scenario.ScenarioManagers))
+    {
+        return Results.StatusCode(403);
+    }
+
+    var request = new DeployScenarioRequest(tenantCtx.Current.PlatformTenantId, id, Actor: userCtx.Current.Mail);
+    var deployedScenario = await handler.HandleAsync(request, ct);
+    return Results.Accepted(value: deployedScenario);
 });
 
 app.MapDelete("/api/scenarios/{id:guid}", async (
-    Guid id, ITenantContextAccessor tenantCtx,
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadScenarioRepository scenarioRepo, IWorkloadRepository workloadRepo,
     ScenarioImportExportService importExportService, CancellationToken ct) =>
 {
     try
     {
-        await importExportService.DeleteAsync(tenantCtx.Current, id, actor: "api-user", ct);
+        var scenario = await scenarioRepo.GetAsync(tenantCtx.Current, id, ct);
+        if (scenario is null)
+        {
+            return Results.NotFound(new { error = $"WorkloadScenario {id} nicht gefunden." });
+        }
+        var workload = await workloadRepo.GetAsync(tenantCtx.Current, scenario.WorkloadId, ct);
+        if (workload is null)
+        {
+            return Results.NotFound(new { error = $"Workload {scenario.WorkloadId} nicht gefunden." });
+        }
+        if (!userCtx.Current.CanManageScenario(workload.Id, workload.Owner, scenario.ScenarioManagers))
+        {
+            return Results.StatusCode(403);
+        }
+
+        await importExportService.DeleteAsync(tenantCtx.Current, id, actor: userCtx.Current.Mail, ct);
         return Results.NoContent();
     }
     catch (InvalidOperationException ex)
@@ -387,8 +748,14 @@ app.MapPost("/api/guest-import/inspect", async (
 });
 
 app.MapPost("/api/guest-import/preview", async (
-    HttpRequest request, ITenantContextAccessor tenantCtx, GuestImportService importService, CancellationToken ct) =>
+    HttpRequest request, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    GuestImportService importService, CancellationToken ct) =>
 {
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
     var (stream, mapping, error) = await ReadGuestImportForm(request, ct);
     if (error is not null)
     {
@@ -400,15 +767,21 @@ app.MapPost("/api/guest-import/preview", async (
 });
 
 app.MapPost("/api/guest-import/commit", async (
-    HttpRequest request, ITenantContextAccessor tenantCtx, GuestImportService importService, CancellationToken ct) =>
+    HttpRequest request, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    GuestImportService importService, CancellationToken ct) =>
 {
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
     var (stream, mapping, error) = await ReadGuestImportForm(request, ct);
     if (error is not null)
     {
         return Results.BadRequest(new { error });
     }
 
-    var result = await importService.CommitAsync(tenantCtx.Current, stream!, mapping!, actor: "api-user", ct);
+    var result = await importService.CommitAsync(tenantCtx.Current, stream!, mapping!, actor: userCtx.Current.Mail, ct);
     return Results.Ok(result);
 });
 
@@ -529,10 +902,31 @@ static async Task<(Stream? Stream, GuestImportColumnMapping? Mapping, string? Er
     return (buffer, mapping, null);
 }
 
+static Workload ProjectWorkloadForUser(Workload workload, Guid assignedRoleId)
+{
+    var assignedRole = workload.Roles.FirstOrDefault(r => r.Id == assignedRoleId);
+    var resourceIds = assignedRole?.ResourceMappings.ToHashSet() ?? [];
+
+    return new Workload
+    {
+        Id = workload.Id,
+        PlatformTenantId = workload.PlatformTenantId,
+        Name = workload.Name,
+        Owner = workload.Owner,
+        TemplateId = workload.TemplateId,
+        Active = workload.Active,
+        CreatedAt = workload.CreatedAt,
+        UpdatedAt = workload.UpdatedAt,
+        Roles = assignedRole is null ? [] : [assignedRole],
+        Resources = [.. workload.Resources.Where(r => resourceIds.Contains(r.Id))],
+    };
+}
+
 // ---- Request-DTOs ----------------------------------------------------------
 public sealed record InviteGuestBody(string Mail, string DisplayName, string? DirectoryTenantId = null);
 public sealed record AssignmentBody(Guid GuestId, Guid RoleId);
 public sealed record DeletionValidationBody(bool GracePeriodReached);
+public sealed record ReviewDecisionBody(string Decision);
 public sealed record SeedLargeWorkloadBody(int? GuestCount, string? WorkloadName);
 public sealed record UpdateWorkloadBody(string Name, string? Owner);
 public sealed record UpsertWorkloadRoleBody(string Name, List<Guid> ResourceMappings);
@@ -688,3 +1082,4 @@ public static class DevSeedData
 
 /// <summary>Partial-Klasse, damit WebApplicationFactory&lt;Program&gt; in Integrationstests funktioniert.</summary>
 public partial class Program;
+

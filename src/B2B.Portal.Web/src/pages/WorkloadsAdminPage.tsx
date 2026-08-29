@@ -256,6 +256,9 @@ export function WorkloadsAdminPage() {
               <Button appearance="secondary" size="small" onClick={() => navigate(`/workloads/${w.id}/scenarios`)}>
                 Scenarios
               </Button>
+              <Button appearance="secondary" size="small" onClick={() => navigate(`/workloads/${w.id}`)}>
+                Details
+              </Button>
               {editingWorkloadId !== w.id && (
                 <Button size="small" onClick={() => startEdit(w)}>Bearbeiten</Button>
               )}

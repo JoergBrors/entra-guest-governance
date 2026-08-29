@@ -47,6 +47,8 @@ builder.Services.AddSingleton<IJobHandler, ValidateDeletionHandler>();
 builder.Services.AddSingleton<IJobHandler, DisableGuestHandler>();
 builder.Services.AddSingleton<IJobHandler>(sp => new DeleteGuestHandler(
     sp.GetRequiredService<B2B.Portal.Application.Ports.IGuestAccountRepository>(),
+    sp.GetRequiredService<B2B.Portal.Application.Ports.IAssignmentRepository>(),
+    sp.GetRequiredService<LifecycleService>(),
     allowGuestDelete: bool.TryParse(builder.Configuration["ALLOW_GUEST_DELETE"], out var d) && d,
     sp.GetRequiredService<ILogger<DeleteGuestHandler>>()));
 

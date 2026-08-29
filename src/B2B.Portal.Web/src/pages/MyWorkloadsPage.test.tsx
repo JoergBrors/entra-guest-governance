@@ -23,7 +23,7 @@ vi.mock('@fluentui/react-components', () => ({
 }));
 
 vi.mock('../api/client', () => ({
-  api: { listWorkloads: vi.fn() },
+  api: { listMyWorkloads: vi.fn() },
 }));
 
 const sampleWorkload: Workload = {
@@ -39,7 +39,7 @@ const sampleWorkload: Workload = {
 
 describe('MyWorkloadsPage', () => {
   beforeEach(() => {
-    vi.mocked(api.listWorkloads).mockResolvedValue([sampleWorkload]);
+    vi.mocked(api.listMyWorkloads).mockResolvedValue([sampleWorkload]);
   });
 
   it('zeigt Workload-Namen und Rollen, aber keine technischen Ressourcendetails', async () => {
@@ -53,7 +53,7 @@ describe('MyWorkloadsPage', () => {
   });
 
   it('zeigt einen Hinweis, wenn keine Workloads zugeordnet sind', async () => {
-    vi.mocked(api.listWorkloads).mockResolvedValue([]);
+    vi.mocked(api.listMyWorkloads).mockResolvedValue([]);
 
     render(<MyWorkloadsPage />);
 

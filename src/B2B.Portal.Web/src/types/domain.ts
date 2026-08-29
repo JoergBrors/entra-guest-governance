@@ -202,3 +202,15 @@ export interface GuestImportResult {
   assignmentCount: number;
   warningCount: number;
 }
+
+export interface UiConfiguration {
+  platformTenantId?: string | null;
+  themeId: string;
+  branding: {
+    productName: string;
+  };
+  user: {
+    mail: string;
+    roles: string[];
+  };
+}

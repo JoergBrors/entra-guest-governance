@@ -22,3 +22,4 @@ Ergebnis-Protokoll je Auftrag, nicht der Auftrag selbst.
 | 12 | 2026-08-29 | Workloads/Szenarien editier- und löschbar machen (Chat-Auftrag) | [12-workload-scenario-edit-delete.md](12-workload-scenario-edit-delete.md) |
 | 13 | 2026-08-29 | Nutzerzahlen, Workload-Hart-Löschen, Guest-Pool-Unassign, Szenario-Cleanup (Chat-Auftrag) | [13-workload-user-counts-hard-delete.md](13-workload-user-counts-hard-delete.md) |
 | 14 | 2026-08-29 | Excel-Gäste-Import mit konfigurierbarem Spalten-Mapping (Phase 4 des Plans, Plan-Modus + Chat-Auftrag) | [14-guest-excel-import.md](14-guest-excel-import.md) |
+| 15 | 2026-08-29 | Challenge + GUI-/Theme-/Doku-Erweiterung (Chat-Auftrag) | [15-challenge-and-gui-extensions.md](15-challenge-and-gui-extensions.md) |

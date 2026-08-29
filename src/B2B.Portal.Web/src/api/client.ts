@@ -3,6 +3,7 @@ import type {
   GuestWorkloadAssignment, ReviewInstance, AuditEvent, DeletionGateEvaluation,
   WorkloadScenario, ScenarioTemplateDto, ScenarioImportResult,
   GuestImportInspectResult, GuestImportColumnMapping, GuestImportResult,
+  UiConfiguration,
 } from '../types/domain';
 
 // API_BASE_URL und der Platform-Tenant kommen aus Vite-Env-Variablen (siehe .env.example
@@ -14,6 +15,13 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:5000
 // Serverseite validiert den Tenant-Kontext ohnehin unabhängig vom Client (siehe
 // B2B.Portal.Api ITenantContextAccessor).
 const DEV_PLATFORM_TENANT_ID = import.meta.env.VITE_DEV_PLATFORM_TENANT_ID ?? 'dev-tenant-a';
+const DEV_PORTAL_USER_MAIL = import.meta.env.VITE_DEV_PORTAL_USER_MAIL ?? 'admin@platform.example';
+const DEV_PORTAL_ROLES = import.meta.env.VITE_DEV_PORTAL_ROLES ?? 'GovernanceAdmin,User,Reviewer';
+
+function devThemeHeader(): Record<string, string> {
+  const themeId = localStorage.getItem('portal-theme-id');
+  return themeId ? { 'X-Portal-Theme-Id': themeId } : {};
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -21,6 +29,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: {
       'Content-Type': 'application/json',
       'X-Platform-Tenant-Id': DEV_PLATFORM_TENANT_ID,
+      'X-Portal-User-Mail': DEV_PORTAL_USER_MAIL,
+      'X-Portal-Roles': DEV_PORTAL_ROLES,
+      ...devThemeHeader(),
       ...(init?.headers ?? {}),
     },
   });
@@ -51,7 +62,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 async function requestForm<T>(path: string, form: FormData): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'X-Platform-Tenant-Id': DEV_PLATFORM_TENANT_ID },
+    headers: {
+      'X-Platform-Tenant-Id': DEV_PLATFORM_TENANT_ID,
+      'X-Portal-User-Mail': DEV_PORTAL_USER_MAIL,
+      'X-Portal-Roles': DEV_PORTAL_ROLES,
+      ...devThemeHeader(),
+    },
     body: form,
   });
 
@@ -85,6 +101,8 @@ function mappingToFormValue(mapping: GuestImportColumnMapping): string {
 
 export const api = {
   health: () => request<{ status: string; mode: string }>('/health'),
+  uiConfiguration: () => request<UiConfiguration>('/api/ui/configuration'),
+  myNavigation: () => request<{ items: string[] }>('/api/me/navigation'),
 
   listGuests: () => request<GuestAccount[]>('/api/guest-accounts'),
   getGuest: (id: string) => request<GuestAccount>(`/api/guest-accounts/${id}`),
@@ -92,6 +110,8 @@ export const api = {
     request<GuestWorkloadAssignment[]>(`/api/guest-accounts/${guestId}/assignments`),
 
   listWorkloads: () => request<Workload[]>('/api/workloads'),
+  listMyWorkloads: () => request<Workload[]>('/api/me/workloads'),
+  getWorkload: (id: string) => request<Workload>(`/api/workloads/${id}`),
 
   updateWorkload: (workloadId: string, name: string, owner: string | null) =>
     request<Workload>(`/api/workloads/${workloadId}`, {
@@ -142,6 +162,11 @@ export const api = {
     request<void>(`/api/workloads/${workloadId}/resources/${resourceId}`, { method: 'DELETE' }),
 
   listOpenReviews: () => request<ReviewInstance[]>('/api/reviews'),
+  decideReviewItem: (reviewInstanceId: string, reviewItemId: string, decision: 'Keep' | 'Remove' | 'Escalated') =>
+    request<void>(`/api/reviews/${reviewInstanceId}/items/${reviewItemId}/decision`, {
+      method: 'POST',
+      body: JSON.stringify({ decision }),
+    }),
 
   listAuditEvents: () => request<AuditEvent[]>('/api/audit-events'),
 
