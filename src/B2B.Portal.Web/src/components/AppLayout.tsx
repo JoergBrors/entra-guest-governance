@@ -136,6 +136,9 @@ export function AppLayout({ productName, userMail, roles, platformTenantId, them
                 <NavLink to="/jobs" className={styles.navLink}>
                   Jobs
                 </NavLink>
+                <NavLink to="/worker" className={styles.navLink}>
+                  Worker
+                </NavLink>
                 <NavLink to="/audit" className={styles.navLink}>
                   Audit
                 </NavLink>

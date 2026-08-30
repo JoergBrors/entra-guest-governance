@@ -113,6 +113,10 @@ internal sealed class DirectoryOperationDocument
     [JsonPropertyName("createdAt")] public required DateTimeOffset CreatedAt { get; init; }
     [JsonPropertyName("updatedAt")] public required DateTimeOffset UpdatedAt { get; init; }
     [JsonPropertyName("log")] public List<JobLogEntryDocument> Log { get; init; } = [];
+    // Optional: Dokumente aus der Zeit vor dieser Erweiterung haben kein payloadJson -> null,
+    // System.Text.Json belaesst fehlende Properties beim Deserialisieren auf ihrem Default
+    // (null), bricht also nicht an bestehenden Cosmos-Dokumenten.
+    [JsonPropertyName("payloadJson")] public string? PayloadJson { get; init; }
 
     public static DirectoryOperationDocument FromEntity(DirectoryOperation op) => new()
     {
@@ -132,6 +136,7 @@ internal sealed class DirectoryOperationDocument
         CreatedAt = op.CreatedAt,
         UpdatedAt = op.UpdatedAt,
         Log = [.. op.Log.Select(l => new JobLogEntryDocument(l.Timestamp, l.Status, l.Message))],
+        PayloadJson = op.PayloadJson,
     };
 
     public DirectoryOperation ToEntity() => new()
@@ -152,6 +157,7 @@ internal sealed class DirectoryOperationDocument
         CreatedAt = CreatedAt,
         UpdatedAt = UpdatedAt,
         Log = [.. Log.Select(l => new JobLogEntry(l.Timestamp, l.Status, l.Message))],
+        PayloadJson = PayloadJson,
     };
 }
 

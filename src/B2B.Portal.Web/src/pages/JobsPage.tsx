@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Badge, Button, Card, MessageBar, MessageBarBody, Spinner, Text, Title2,
   makeStyles, tokens,
@@ -65,6 +66,13 @@ export function JobsPage() {
   const [jobs, setJobs] = useState<JobStatusResponse[] | null>(null);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Filter aus der URL (?jobType=X&status=Y) — gesetzt, wenn von der Worker-Uebersicht
+  // (WorkerOverviewPage) in die fehlgeschlagenen Jobs eines Typs hineingelinkt wird. Die
+  // beiden Seiten "interagieren" dadurch statt zwei getrennte Ansichten zu sein.
+  const jobTypeFilter = searchParams.get('jobType');
+  const statusFilter = searchParams.get('status');
 
   const reload = () => {
     api.listJobs()
@@ -92,9 +100,28 @@ export function JobsPage() {
     }
   };
 
+  const restartJob = async (jobId: string) => {
+    setError(null);
+    try {
+      const created = await api.restartJob(jobId);
+      setJobs((prev) => (prev ? [created, ...prev] : prev));
+      setSelectedJobId(created.id);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const clearFilter = () => setSearchParams({});
+
   if (!jobs) {
     return <Spinner label="Lade Jobs..." />;
   }
+
+  const visibleJobs = jobs.filter((job) => {
+    if (jobTypeFilter && job.jobType !== jobTypeFilter) return false;
+    if (statusFilter && job.status !== statusFilter) return false;
+    return true;
+  });
 
   const runningCount = jobs.filter((j) => j.status === 'Running').length;
   const pendingCount = jobs.filter((j) => j.status === 'Pending').length;
@@ -109,6 +136,16 @@ export function JobsPage() {
     <div>
       <Title2>Jobs</Title2>
       <Text>Worker-Jobs im erlaubten Kontext: Governance Admin sieht alle Jobs, Workload Owner nur Jobs ihrer Workloads.</Text>
+
+      {(jobTypeFilter || statusFilter) && (
+        <MessageBar intent="info" style={{ marginTop: 12 }}>
+          <MessageBarBody>
+            Gefiltert auf {jobTypeFilter ? `Typ "${jobTypeFilter}"` : 'alle Typen'}
+            {statusFilter ? `, Status "${statusFilter}"` : ''}.{' '}
+            <Button size="small" appearance="transparent" onClick={clearFilter}>Filter zurücksetzen</Button>
+          </MessageBarBody>
+        </MessageBar>
+      )}
 
       <div className={styles.summary}>
         <Card className={styles.summaryCard}>
@@ -138,12 +175,12 @@ export function JobsPage() {
       )}
 
       <div className={styles.list}>
-        {jobs.length === 0 && (
+        {visibleJobs.length === 0 && (
           <Card className={styles.card}>
             <Text>Keine sichtbaren Jobs vorhanden.</Text>
           </Card>
         )}
-        {jobs.map((job) => {
+        {visibleJobs.map((job) => {
           const selected = selectedJobId === job.id;
           return (
             <Card key={job.id} className={styles.card}>
@@ -167,6 +204,9 @@ export function JobsPage() {
                   </Button>
                   <Button size="small" appearance="secondary" disabled={!canStop(job)} onClick={() => stopJob(job.id)}>
                     Stop
+                  </Button>
+                  <Button size="small" appearance="secondary" disabled={!canRestart(job)} onClick={() => restartJob(job.id)}>
+                    Restart
                   </Button>
                 </div>
               </div>
@@ -200,6 +240,10 @@ export function JobsPage() {
 
 function canStop(job: JobStatusResponse): boolean {
   return ['Pending', 'Running', 'Retry'].includes(job.status);
+}
+
+function canRestart(job: JobStatusResponse): boolean {
+  return job.status === 'Failed' || job.status === 'DeadLetter';
 }
 
 function statusColor(status: JobStatusResponse['status']) {

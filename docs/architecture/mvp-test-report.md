@@ -419,6 +419,59 @@ Ausgefuehrte Checks:
 | `dotnet build -c Debug` | erfolgreich, 0 Warnungen, 0 Fehler |
 | `dotnet test -c Debug` | erfolgreich, 79 Tests bestanden (Domain 29, Architecture 5, Application 3, Integration 42), 0 fehlgeschlagen, 0 uebersprungen — Cosmos-Emulator lief, alle Cosmos-Tests liefen echt |
 
+## 15. Erweiterung 2026-08-30 (Teil 5): Worker/Trigger-Uebersicht, Job-Restart, Discovery-/Reconciliation-Trigger
+
+Bisher gab es keine Uebersicht PRO JOB-TYP (nur pro Einzeljob in `JobsPage`), keinen Weg,
+`RunDiscovery`/`RunReconciliation` manuell anzustossen (kein Enqueue-Aufrufer existierte fuer
+beide im gesamten Code), und keinen Weg, einen fehlgeschlagenen Job mit denselben Parametern
+neu zu starten (kein `DirectoryOperation`-Feld speicherte den urspruenglichen Payload).
+
+Backend:
+
+- `DirectoryOperation.PayloadJson` (neu, nullable) — serialisierter Original-Payload, mit dem
+  ein Job ueber `ProvisioningService.EnqueueJobAsync` erzeugt wurde. `EnqueueJobAsync`
+  serialisiert den Payload jetzt einmal und nutzt ihn sowohl fuer `DirectoryOperation` als
+  auch fuer den `JobEnvelope` (vorher zwei separate Serialisierungen). Persistenz in
+  `CosmosJobRepository`/`DirectoryOperationDocument` als optionales Feld `payloadJson` —
+  bestehende Cosmos-Dokumente ohne dieses Feld deserialisieren weiterhin klaglos (`null`).
+- `POST /api/jobs/{id}/restart` — nur fuer Jobs im Status `Failed`/`DeadLetter` (sonst 400,
+  gleiches Muster wie `POST /api/jobs/{id}/stop`). Legt einen NEUEN Job mit identischem
+  JobType/EntityType/EntityId/Payload an (neue CorrelationId, neue Id, RetryCount 0) — der
+  fehlgeschlagene Datensatz bleibt unveraendert als Historie erhalten. Zugriff: dieselbe Regel
+  wie beim Betrachten des Jobs (`CanAccessJobAsync`).
+- `POST /api/jobs/trigger/discovery` — Governance-Admin-only, enqueued einen tenant-weiten
+  `RunDiscovery`-Job (`EntityType: "Tenant"`, `EntityId: DirectoryTenantId`) — der einzig
+  sinnvolle Zuschnitt, da `DiscoveryHandler` ueber `IGuestDirectory` den ganzen Tenant liest.
+- `POST /api/jobs/trigger/reconciliation` — Governance-Admin-only. `ReconciliationHandler`
+  vergleicht Desired-/Actual-State PRO GAST (`Payload.GuestId`), es gibt keinen tenant-weiten
+  Reconciliation-Job. Der Trigger enqueued daher einen `RunReconciliation`-Job je Gast mit
+  mindestens einer aktiven Zuweisung (ein Sweep ueber den Tenant) und gibt
+  `{ queuedJobCount, jobIds }` zurueck.
+- Beide Trigger-Endpunkte liegen bewusst unter `/api/jobs/*` (nicht `/api/dev/*`) — Discovery/
+  Reconciliation sind echte Governance-Operationen, kein LOCAL_MOCK-only Test-Tooling.
+
+Frontend:
+
+- Neue Seite `WorkerOverviewPage.tsx` (Route `/worker`, Nav-Eintrag "Worker" direkt neben
+  "Jobs"): aggregiert `GET /api/jobs` client-seitig pro `jobType` (Gesamt/Erfolg/Fehler/
+  Wartend, letzte Aktivitaet). "Jetzt ausfuehren" fuer `RunDiscovery`/`RunReconciliation`.
+  Klick auf die Fehlerzahl navigiert nach `/jobs?jobType=X&status=Failed`.
+- `JobsPage.tsx` liest jetzt `?jobType=`/`?status=` per `useSearchParams` und filtert die
+  Liste entsprechend (mit Reset-Hinweis) — die Verlinkung von der Worker-Uebersicht funktioniert
+  dadurch ohne Duplizierung der Job-Listen-UI. Neuer "Restart"-Button neben "Stop" fuer Jobs
+  im Status `Failed`/`DeadLetter`.
+- `api/client.ts`: `restartJob`, `triggerDiscovery`, `triggerReconciliation`.
+
+Verifikation: `dotnet build` (0/0), `dotnet test` (79/79 bestanden, Cosmos-Emulator lief real),
+`npm run build` (0 TS-Fehler), `npm run test -- --run` (5/5 bestanden). Live-Smoke-Test mit
+Cosmos-Emulator: API + Worker lokal gestartet, `POST /api/jobs/trigger/discovery` und
+`.../trigger/reconciliation` liefen bis `Success` durch (Discovery fand 5 Gaeste, siehe
+`GET /api/guest-accounts`), `POST /api/jobs/{id}/restart` auf einem `Success`-Job korrekt mit
+400 abgelehnt. Ein genuin fehlgeschlagener Job liess sich in der verfuegbaren Zeit nicht
+provozieren (Handler behandeln fehlende Fachdaten defensiv als No-op statt Exception) — der
+Restart-Happy-Path (Payload lesen, `EnqueueJobAsync` erneut aufrufen) ist damit nur
+code-verifiziert, nicht live gegen einen echten Failed-Job getestet.
+
 ## Gesamtstatus
 
 **PASS WITH PENDING INTEGRATIONS** — Frontend und Backend bauen und testen vollständig

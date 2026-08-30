@@ -235,6 +235,124 @@ app.MapPost("/api/jobs/{id:guid}/stop", async (
     return Results.Ok(await ToJobStatusResponseAsync(tenantCtx.Current, job, workloadRepository, ct));
 });
 
+// Erweiterung 2026-08-30 (Worker/Trigger-Uebersicht): Restart legt bewusst einen NEUEN Job
+// mit denselben Parametern an statt den bestehenden DirectoryOperation-Datensatz erneut zu
+// versuchen — der fehlgeschlagene Datensatz bleibt unveraendert als Historie/Audit-Spur
+// erhalten, der neue Job startet mit RetryCount 0 und eigener CorrelationId. Zugriff: dieselbe
+// Sichtbarkeitsregel wie beim Betrachten des Jobs (CanAccessJobAsync) reicht aus — wer den
+// fehlgeschlagenen Job sehen darf (Governance Admin oder Workload Owner des betroffenen
+// Workload), darf ihn auch neu anstossen; kein zusaetzliches Admin-Gate noetig.
+app.MapPost("/api/jobs/{id:guid}/restart", async (
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IJobRepository jobRepository, IWorkloadRepository workloadRepository,
+    ProvisioningService provisioningService, CancellationToken ct) =>
+{
+    var job = await jobRepository.GetAsync(tenantCtx.Current, id, ct);
+    if (job is null)
+    {
+        return Results.NotFound(new { error = $"Job {id} nicht gefunden." });
+    }
+
+    if (!await CanAccessJobAsync(userCtx.Current, tenantCtx.Current, job, workloadRepository, ct))
+    {
+        return Results.StatusCode(403);
+    }
+
+    if (job.Status is not (JobStatus.Failed or JobStatus.DeadLetter))
+    {
+        return Results.BadRequest(new { error = $"Job {id} ist im Status {job.Status} und kann nicht neu gestartet werden (nur Failed/DeadLetter)." });
+    }
+
+    if (job.PayloadJson is null)
+    {
+        return Results.BadRequest(new { error = $"Job {id} hat keinen gespeicherten Payload (vermutlich vor Einfuehrung von Restart erzeugt) und kann nicht neu gestartet werden." });
+    }
+
+    object payload = JsonSerializer.Deserialize<JsonElement>(job.PayloadJson);
+    var newJob = await provisioningService.EnqueueJobAsync(
+        job.PlatformTenantId,
+        job.DirectoryTenantId,
+        job.JobType,
+        job.EntityType,
+        job.EntityId,
+        job.DesiredStateHash,
+        payload,
+        correlationId: Guid.NewGuid(),
+        ct,
+        triggeredBy: $"Restart von {userCtx.Current.Mail} (Original: {job.Id})",
+        workloadId: job.WorkloadId);
+
+    return Results.Ok(await ToJobStatusResponseAsync(tenantCtx.Current, newJob, workloadRepository, ct));
+});
+
+// Erweiterung 2026-08-30: generische "Jetzt ausfuehren"-Trigger fuer Job-Typen ohne fachlichen
+// Kontext-Parameter (kein Guest/Workload/Role aus einem bestehenden Flow). RunDiscovery und
+// RunReconciliation hatten bisher UEBERHAUPT keinen Enqueue-Aufrufer im Code. Bewusst unter
+// /api/jobs/* (Erweiterung des bestehenden Jobs-Endpunkt-Blocks) statt /api/dev/* — Discovery/
+// Reconciliation sind echte Governance-Operationen (auch wenn aktuell nur Mock-Handler
+// existieren), kein LOCAL_MOCK-only Test-Tooling wie die /api/dev/seed/*-Endpunkte.
+app.MapPost("/api/jobs/trigger/discovery", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepository, ProvisioningService provisioningService, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var tenant = tenantCtx.Current;
+    var directoryTenantId = tenant.DirectoryTenantId ?? string.Empty;
+    var correlationId = Guid.NewGuid();
+    var hash = DesiredStateHasher.Hash("RunDiscovery", tenant.PlatformTenantId, directoryTenantId, correlationId.ToString());
+
+    // Discovery liest ueber IGuestDirectory tenant-weit alle Gaeste/Memberships (siehe
+    // DiscoveryHandler) — es gibt keine einzelne Zielentitaet, daher EntityType "Tenant" mit
+    // dem DirectoryTenantId als EntityId.
+    var job = await provisioningService.EnqueueJobAsync(
+        tenant.PlatformTenantId, tenant.DirectoryTenantId, JobTypes.RunDiscovery,
+        "Tenant", directoryTenantId, hash, new { }, correlationId, ct,
+        triggeredBy: userCtx.Current.Mail);
+
+    return Results.Ok(await ToJobStatusResponseAsync(tenant, job, workloadRepository, ct));
+});
+
+app.MapPost("/api/jobs/trigger/reconciliation", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IGuestAccountRepository guestRepository, IAssignmentRepository assignmentRepository,
+    IWorkloadRepository workloadRepository, ProvisioningService provisioningService, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var tenant = tenantCtx.Current;
+    // ReconciliationHandler vergleicht Desired-/Actual-State PRO GAST (job.Payload.GuestId) —
+    // anders als Discovery gibt es keinen tenant-weiten Reconciliation-Job. "Jetzt ausfuehren"
+    // bedeutet hier daher: fuer jeden Gast mit mindestens einer aktiven Zuweisung einen
+    // Reconciliation-Job einreihen (ein Sweep ueber den ganzen Tenant).
+    var guests = await guestRepository.ListAsync(tenant, ct);
+    var createdJobIds = new List<Guid>();
+    foreach (var guest in guests)
+    {
+        var activeAssignments = await assignmentRepository.ListActiveByGuestAsync(tenant, guest.Id, ct);
+        if (activeAssignments.Count == 0)
+        {
+            continue;
+        }
+
+        var correlationId = Guid.NewGuid();
+        var hash = DesiredStateHasher.Hash("RunReconciliation", guest.Id.ToString(), correlationId.ToString());
+        var job = await provisioningService.EnqueueJobAsync(
+            tenant.PlatformTenantId, tenant.DirectoryTenantId, JobTypes.RunReconciliation,
+            nameof(GuestAccount), guest.Id.ToString(), hash, new { GuestId = guest.Id }, correlationId, ct,
+            triggeredBy: userCtx.Current.Mail);
+        createdJobIds.Add(job.Id);
+    }
+
+    return Results.Ok(new { queuedJobCount = createdJobIds.Count, jobIds = createdJobIds });
+});
+
 // Bewusst ohne [Authorize]/AllowAnonymous-Zwang durch userCtx: die Login-Seite braucht
 // Theme/Branding, bevor ein Token existiert. user/platformTenantId sind nur gefuellt, wenn
 // ein gueltiges Bearer-Token vorliegt (kein Fallback auf einen Default-User mehr — genau das

@@ -25,6 +25,16 @@ public sealed class DirectoryOperation
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public List<JobLogEntry> Log { get; init; } = [];
+
+    /// <summary>
+    /// Serialisierter Original-Payload (JSON), mit dem der Job ueber
+    /// ProvisioningService.EnqueueJobAsync erzeugt wurde — noetig, um einen fehlgeschlagenen
+    /// Job als NEUEN Job mit identischen Parametern neu zu starten (Restart, siehe
+    /// POST /api/jobs/{id}/restart). Optional/nullable: bestehende Cosmos-Dokumente aus der
+    /// Zeit vor dieser Erweiterung haben das Feld nicht — Restart ist fuer solche alten Jobs
+    /// dann schlicht nicht moeglich (kein Payload zum Wiederholen bekannt).
+    /// </summary>
+    public string? PayloadJson { get; init; }
 }
 
 /// <summary>

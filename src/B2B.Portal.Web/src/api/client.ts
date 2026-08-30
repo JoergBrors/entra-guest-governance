@@ -107,6 +107,10 @@ export const api = {
   listJobs: () => request<JobStatusResponse[]>('/api/jobs'),
   getJobStatus: (jobId: string) => request<JobStatusResponse>(`/api/jobs/${jobId}`),
   stopJob: (jobId: string) => request<JobStatusResponse>(`/api/jobs/${jobId}/stop`, { method: 'POST' }),
+  restartJob: (jobId: string) => request<JobStatusResponse>(`/api/jobs/${jobId}/restart`, { method: 'POST' }),
+  triggerDiscovery: () => request<JobStatusResponse>('/api/jobs/trigger/discovery', { method: 'POST' }),
+  triggerReconciliation: () =>
+    request<{ queuedJobCount: number; jobIds: string[] }>('/api/jobs/trigger/reconciliation', { method: 'POST' }),
   uiConfiguration: () => request<UiConfiguration>('/api/ui/configuration'),
   myNavigation: () => request<{ items: string[] }>('/api/me/navigation'),
   mockLogin: (mail: string) =>

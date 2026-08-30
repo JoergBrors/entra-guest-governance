@@ -1,6 +1,6 @@
 # Local Mock
 
-Stand: 2026-08-30 (aktualisiert: Identity Provider + JWT-Login; Mock-Entra-User-Persistenz + Startup-Hydration)
+Stand: 2026-08-30 (aktualisiert: Identity Provider + JWT-Login; Mock-Entra-User-Persistenz + Startup-Hydration; Worker/Trigger-Uebersicht + Job-Restart)
 
 `LOCAL_MOCK` bleibt der Default fuer lokale Entwicklung.
 
@@ -37,6 +37,23 @@ Alle Endpunkte ausser `/health`, `/api/auth/mock/login`, `/api/ui/configuration`
 unveraendert — nur die Authentifizierungsschicht davor wurde ersetzt.
 
 `X-Portal-Theme-Id` bleibt ein freier Header (reine UI-Praeferenz, kein Auth-/Identitaetsbezug).
+
+## Worker/Trigger-Uebersicht, Job-Restart (Erweiterung 2026-08-30)
+
+Neue Seite "Worker" (`/worker`, neben "Jobs" in der Governance-Nav) zeigt Jobs aggregiert pro
+JobType (Anzahl/Erfolg/Fehler/Wartend). `RunDiscovery` und `RunReconciliation` — die einzigen
+Job-Typen ohne fachlichen Kontext-Parameter — haben dort einen "Jetzt ausfuehren"-Button
+(`POST /api/jobs/trigger/discovery` bzw. `.../trigger/reconciliation`, Governance-Admin-only).
+Alle anderen Job-Typen entstehen weiterhin nur kontextuell (Workloads-Admin, Gast-Einladung
+etc.) und erscheinen in der Worker-Uebersicht read-only.
+
+Jeder fehlgeschlagene Job (`Failed`/`DeadLetter`) hat einen "Restart"-Button — sowohl in
+`JobsPage` als auch per Klick auf die Fehlerzahl in der Worker-Uebersicht (springt gefiltert
+in `JobsPage`, `?jobType=X&status=Failed`). Restart legt einen NEUEN Job mit identischem
+Payload an (`POST /api/jobs/{id}/restart`) — der urspruengliche fehlgeschlagene Datensatz
+bleibt als Historie erhalten. Voraussetzung: der Job wurde nach Einfuehrung von
+`DirectoryOperation.PayloadJson` erzeugt (aeltere Jobs ohne gespeicherten Payload koennen
+nicht neu gestartet werden, 400 mit entsprechender Fehlermeldung).
 
 Produktive Werte: `configuration required`.
 

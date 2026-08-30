@@ -15,6 +15,7 @@ import { WorkloadDetailPage } from './pages/WorkloadDetailPage';
 import { GuestDetailPage } from './pages/GuestDetailPage';
 import { AccessRequestPage } from './pages/AccessRequestPage';
 import { JobsPage } from './pages/JobsPage';
+import { WorkerOverviewPage } from './pages/WorkerOverviewPage';
 import { CompliancePage } from './pages/CompliancePage';
 import { DiscoveryPage } from './pages/DiscoveryPage';
 import { DevThemePreviewPage } from './pages/DevThemePreviewPage';
@@ -103,6 +104,7 @@ export function App() {
               <Route path="compliance" element={<CompliancePage />} />
               <Route path="discovery" element={<DiscoveryPage />} />
               <Route path="jobs" element={<JobsPage />} />
+              <Route path="worker" element={<WorkerOverviewPage />} />
               {import.meta.env.DEV && <Route path="dev/theme-preview" element={<DevThemePreviewPage />} />}
               {import.meta.env.DEV && <Route path="dev/mock-entra" element={<MockEntraPage />} />}
               <Route path="login" element={<Navigate to="/" replace />} />
