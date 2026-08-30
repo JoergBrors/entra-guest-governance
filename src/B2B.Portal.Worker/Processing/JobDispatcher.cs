@@ -67,9 +67,9 @@ public sealed class JobDispatcher(
         catch (Exception ex)
         {
             // Der Attempt-Zaehler wird von der IJobQueue-Implementierung selbst gefuehrt
-            // (dauerhaft bei CosmosJobQueue, in-memory bei LocalJobQueue) statt hier im
-            // Dispatcher, damit er einen Worker-Neustart bzw. mehrere Worker-Instanzen
-            // uebersteht (siehe IJobQueue.RetryAsync-Dokumentation).
+            // (dauerhaft bei CosmosJobQueue) statt hier im Dispatcher, damit er einen
+            // Worker-Neustart bzw. mehrere Worker-Instanzen uebersteht (siehe
+            // IJobQueue.RetryAsync-Dokumentation).
             var attempt = await jobQueue.RetryAsync(job.JobId, ex.Message, ct);
 
             if (attempt >= MaxRetries)
@@ -114,6 +114,7 @@ public sealed class JobDispatcher(
         {
             operation.RetryCount = retryCount.Value;
         }
+        operation.Log.Add(new JobLogEntry(operation.UpdatedAt, status, error));
 
         await jobRepository.UpsertAsync(operation, ct);
     }

@@ -190,10 +190,8 @@ dotnet run --project src/B2B.Portal.Worker
 npm run dev --prefix src/B2B.Portal.Web
 ```
 
-Voraussetzung: der Cosmos DB Emulator muss laufen (Schritt 0). Ohne laufenden Emulator
-schlägt der Start fehl — alternativ `DATA_PROVIDER=local` in `.env.local` setzen, um
-stattdessen ohne Emulator gegen InMemory-Repositories zu arbeiten (z. B. für schnelle,
-isolierte Tests).
+Voraussetzung: der Cosmos DB Emulator muss laufen (Schritt 0). Cosmos DB ist der einzige
+Datenprovider — ohne laufenden Emulator schlägt der Start fehl.
 
 | Komponente | URL |
 | --- | --- |
@@ -216,9 +214,9 @@ verteilt:
 
 Ruft `POST /api/dev/seed/large-workload` auf — ein Endpoint, der **nur unter
 `B2B_MODE=LOCAL_MOCK`** registriert ist (siehe `src/B2B.Portal.Api/Program.cs`) und über
-dieselben Repository-Pfade wie reguläre Requests schreibt (Cosmos Emulator oder InMemory,
-je nach `DATA_PROVIDER`). Ergebnis danach sichtbar in der Web-UI (Guest Pool,
-Workloads-Admin-Ansicht) oder direkt über `/api/guest-accounts` bzw. `/api/workloads`.
+dieselben Repository-Pfade wie reguläre Requests schreibt (Cosmos DB Emulator). Ergebnis
+danach sichtbar in der Web-UI (Guest Pool, Workloads-Admin-Ansicht) oder direkt über
+`/api/guest-accounts` bzw. `/api/workloads`.
 
 ## Drei Development-Modi
 
@@ -231,13 +229,14 @@ Workloads-Admin-Ansicht) oder direkt über `/api/guest-accounts` bzw. `/api/work
 Konfiguration erfolgt über `.env.local` (Vorlage: `.env.example`). Es werden **keine**
 realen Tenant-IDs, Secrets, Group-IDs oder Mailboxen im Repository hinterlegt.
 
-### Datenhaltung in LOCAL_MOCK: Cosmos DB Emulator als Default
+### Datenhaltung in LOCAL_MOCK: Cosmos DB Emulator als einziger Datenprovider
 
-`DATA_PROVIDER` steuert die Repository-Implementierung und ist unter `LOCAL_MOCK`
-standardmäßig **`cosmos`** — API und Worker schreiben/lesen bereits lokal gegen den Cosmos
-DB Emulator (Datenbank `b2b-governance-dev`, Container `domain`/`discovery`/`jobs`/`audit`,
-siehe `infra/modules/cosmos-free-tier.bicep`), nicht nur gegen InMemory. Das gilt auch für
-Bulk-Läufe wie `scripts/seed-large-workload.ps1` und den Excel-Gäste-Import.
+Cosmos DB ist der einzige Datenprovider (InMemory-Repositories wurden entfernt) — API und
+Worker schreiben/lesen unter `LOCAL_MOCK` immer gegen den lokalen Cosmos DB Emulator
+(Datenbank `b2b-governance-dev`, Container `domain`/`discovery`/`jobs`/`audit`, siehe
+`infra/modules/cosmos-free-tier.bicep`). Das gilt auch für Bulk-Läufe wie
+`scripts/seed-large-workload.ps1` und den Excel-Gäste-Import. Ein laufender Emulator ist
+damit für `LOCAL_MOCK` zwingend erforderlich (siehe Schritt 0).
 
 `API_BASE_URL`/`COSMOS_EMULATOR_ENDPOINT`/`COSMOS_EMULATOR_KEY`/`COSMOS_DATABASE_ID` werden
 von `scripts/requirements.ps1 -InitCosmosEmulator` nach `.env.local` geschrieben und von
@@ -298,8 +297,8 @@ Dienste:
 | `web` | Baut `src/B2B.Portal.Web/Dockerfile` (Vite-Build → nginx), Port `5301:80`, wartet auf gesunde `api` |
 
 Gemeinsame Umgebung (`x-portal-env`): `B2B_MODE=LOCAL_MOCK`, `DIRECTORY_PROVIDER=mock`,
-`EMAIL_PROVIDER=mock`, `DATA_PROVIDER=cosmos`, `JOB_QUEUE_PROVIDER=cosmos`,
-`ALLOW_GRAPH_WRITES=false`, `ALLOW_GUEST_DELETE=false`, `COSMOS_DATABASE_ID=b2b-governance-dev`,
+`EMAIL_PROVIDER=mock`, `JOB_QUEUE_PROVIDER=cosmos`, `ALLOW_GRAPH_WRITES=false`,
+`ALLOW_GUEST_DELETE=false`, `COSMOS_DATABASE_ID=b2b-governance-dev`,
 `VITE_DEV_PLATFORM_TENANT_ID=dev-tenant-a` — identische Sicherheitsdefaults wie beim
 manuellen `LOCAL_MOCK`-Start (keine echten Graph-/Mail-Schreibzugriffe).
 

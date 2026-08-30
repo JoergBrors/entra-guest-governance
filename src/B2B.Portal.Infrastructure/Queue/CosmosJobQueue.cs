@@ -26,7 +26,11 @@ public sealed class CosmosJobQueue(CosmosClientFactory factory) : IJobQueue
     private Container Container => factory.GetContainer("jobs");
 
     public Task EnqueueAsync(JobEnvelope job, CancellationToken ct) =>
-        Container.CreateItemAsync(
+        // UpsertItemAsync statt CreateItemAsync: ProvisioningService.EnqueueJobAsync legt
+        // vorab per IJobRepository.UpsertAsync bereits ein DirectoryOperation-Dokument mit
+        // derselben Id im selben "jobs"-Container an (siehe Klassenkommentar) — CreateItemAsync
+        // wuerde dort mit 409 Conflict scheitern.
+        Container.UpsertItemAsync(
             JobEnvelopeDocument.FromEnvelope(job, status: "Pending", leaseExpiresAt: null, attemptCount: 0),
             new PartitionKey(job.PlatformTenantId),
             cancellationToken: ct);
@@ -35,8 +39,8 @@ public sealed class CosmosJobQueue(CosmosClientFactory factory) : IJobQueue
     {
         var now = DateTimeOffset.UtcNow;
 
-        // Cross-Partition-Query: der Worker verarbeitet Jobs aller Tenants (wie schon
-        // LocalJobQueue es tut, eine gemeinsame Queue). Kandidaten: entweder Pending, oder
+        // Cross-Partition-Query: der Worker verarbeitet Jobs aller Tenants (eine
+        // gemeinsame Queue). Kandidaten: entweder Pending, oder
         // Leased mit abgelaufener Lease (Reclaim eines verwaisten Claims).
         var query = Container.GetItemQueryIterator<JobEnvelopeDocument>(
             new QueryDefinition(

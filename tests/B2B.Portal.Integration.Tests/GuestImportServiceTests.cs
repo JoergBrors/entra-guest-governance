@@ -6,37 +6,60 @@ using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
 using B2B.Portal.Domain.ValueObjects;
 using B2B.Portal.Infrastructure.Data;
+using B2B.Portal.Infrastructure.Data.Cosmos;
 using B2B.Portal.Infrastructure.Import;
 using B2B.Portal.Infrastructure.Queue;
 using ClosedXML.Excel;
+using Microsoft.Extensions.Configuration;
 using Xunit;
 
 namespace B2B.Portal.Integration.Tests;
 
 /// <summary>
-/// Testet GuestImportService gegen InMemory-Repositories: Regel-Matching über freie Fields,
-/// Preview-Schreibfreiheit, Commit-Idempotenz, und den Fremd-Workload-Review-Hinweis bei
-/// geänderten Gast-Daten (siehe Prompt "wennn der workload... bitte auch im review für den
-/// alten Workload... sichtbar machen").
+/// Testet GuestImportService gegen den echten lokalen Cosmos DB Emulator (InMemory-
+/// Repositories entfernt): Regel-Matching über freie Fields, Preview-Schreibfreiheit,
+/// Commit-Idempotenz, und den Fremd-Workload-Review-Hinweis bei geänderten Gast-Daten
+/// (siehe Prompt "wennn der workload... bitte auch im review für den alten Workload...
+/// sichtbar machen"). Übersprungen (frühes return), wenn kein Emulator läuft (siehe
+/// CosmosEmulatorAvailability) — dotnet test bleibt CI-sicher. Nutzt pro Testlauf
+/// eindeutige Tenant-IDs (Guid-Suffix), damit parallele/wiederholte Testläufe sich nicht
+/// gegenseitig über bereits vorhandene Cosmos-Dokumente stören.
 /// </summary>
 public class GuestImportServiceTests
 {
+    private static readonly bool EmulatorAvailable = CosmosEmulatorAvailability.IsRunning();
+
+    private static CosmosClientFactory BuildFactory()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["COSMOS_EMULATOR_ENDPOINT"] = "https://localhost:8081",
+                ["COSMOS_EMULATOR_KEY"] =
+                    "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==",
+                ["COSMOS_DATABASE_ID"] = "b2b-governance-dev",
+            })
+            .Build();
+        return new CosmosClientFactory(config);
+    }
+
     private sealed record Fixture(
-        GuestImportService Service, InMemoryWorkloadRepository WorkloadRepo,
-        InMemoryWorkloadScenarioRepository ScenarioRepo, InMemoryGuestAccountRepository GuestRepo,
-        InMemoryAssignmentRepository AssignmentRepo, InMemoryReviewRepository ReviewRepo);
+        GuestImportService Service, CosmosWorkloadRepository WorkloadRepo,
+        CosmosWorkloadScenarioRepository ScenarioRepo, CosmosGuestAccountRepository GuestRepo,
+        CosmosAssignmentRepository AssignmentRepo, CosmosReviewRepository ReviewRepo);
 
     private static Fixture Build()
     {
-        var workloadRepo = new InMemoryWorkloadRepository();
-        var scenarioRepo = new InMemoryWorkloadScenarioRepository();
-        var guestRepo = new InMemoryGuestAccountRepository();
-        var assignmentRepo = new InMemoryAssignmentRepository();
-        var reviewRepo = new InMemoryReviewRepository();
-        var jobRepo = new InMemoryJobRepository();
-        var queue = new LocalJobQueue();
+        var factory = BuildFactory();
+        var workloadRepo = new CosmosWorkloadRepository(factory);
+        var scenarioRepo = new CosmosWorkloadScenarioRepository(factory);
+        var guestRepo = new CosmosGuestAccountRepository(factory);
+        var assignmentRepo = new CosmosAssignmentRepository(factory);
+        var reviewRepo = new CosmosReviewRepository(factory);
+        var jobRepo = new CosmosJobRepository(factory);
+        var queue = new CosmosJobQueue(factory);
         var clock = new SystemClock();
-        var auditService = new AuditService(new InMemoryAuditWriter(), clock);
+        var auditService = new AuditService(new CosmosAuditWriter(factory), clock);
         var provisioningService = new ProvisioningService(jobRepo, queue, clock);
         var grantHandler = new GrantWorkloadRoleCommandHandler(assignmentRepo, provisioningService, auditService);
         var reader = new ClosedXmlSpreadsheetReader();
@@ -83,9 +106,9 @@ public class GuestImportServiceTests
         });
 
     private static async Task<(Workload Workload, WorkloadScenario Scenario, WorkloadRole DisponentRole)> SeedWorkloadAsync(
-        Fixture fx, TenantContext tenant)
+        Fixture fx, TenantContext tenant, string workloadName = "SAP-Rollout")
     {
-        var workload = new Workload { PlatformTenantId = tenant.PlatformTenantId, Name = "SAP-Rollout" };
+        var workload = new Workload { PlatformTenantId = tenant.PlatformTenantId, Name = workloadName };
         var resource = new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "SG-DISPONENT" };
         var role = new WorkloadRole { WorkloadId = workload.Id, Name = "Disponent-Rolle" };
         role.ResourceMappings.Add(resource.Id);
@@ -107,8 +130,11 @@ public class GuestImportServiceTests
     [Fact]
     public async Task Preview_MatchesRuleAndDoesNotWrite()
     {
+        if (!EmulatorAvailable) { return; }
+
         var fx = Build();
-        var tenant = TenantContext.Create("guest-import-tenant-1");
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var tenant = TenantContext.Create($"guest-import-tenant-1-{suffix}");
         await SeedWorkloadAsync(fx, tenant);
 
         using var stream = BuildWorkbook(
@@ -126,18 +152,21 @@ public class GuestImportServiceTests
     [Fact]
     public async Task Commit_CreatesGuestAndAssignment()
     {
+        if (!EmulatorAvailable) { return; }
+
         var fx = Build();
-        var tenant = TenantContext.Create("guest-import-tenant-2");
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var tenant = TenantContext.Create($"guest-import-tenant-2-{suffix}");
         var (workload, _, role) = await SeedWorkloadAsync(fx, tenant);
 
         using var stream = BuildWorkbook(
             ["Mail", "Name", "Workload", "Szenario", "Rolle"],
-            ["anna@example.com", "Anna Muster", "SAP-Rollout", "Onboarding", "Disponent"]);
+            [$"anna-{suffix}@example.com", "Anna Muster", "SAP-Rollout", "Onboarding", "Disponent"]);
 
         var result = await fx.Service.CommitAsync(tenant, stream, DefaultMapping(), "test", CancellationToken.None);
 
         Assert.Equal(1, result.NewGuestCount);
-        var guest = await fx.GuestRepo.GetByMailAsync(tenant, "anna@example.com", CancellationToken.None);
+        var guest = await fx.GuestRepo.GetByMailAsync(tenant, $"anna-{suffix}@example.com", CancellationToken.None);
         Assert.NotNull(guest);
         var assignments = await fx.AssignmentRepo.ListActiveByGuestAsync(tenant, guest!.Id, CancellationToken.None);
         Assert.Single(assignments);
@@ -148,45 +177,52 @@ public class GuestImportServiceTests
     [Fact]
     public async Task Commit_NoRuleMatch_StillCreatesGuestWithWarning()
     {
+        if (!EmulatorAvailable) { return; }
+
         var fx = Build();
-        var tenant = TenantContext.Create("guest-import-tenant-3");
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var tenant = TenantContext.Create($"guest-import-tenant-3-{suffix}");
         await SeedWorkloadAsync(fx, tenant);
 
         using var stream = BuildWorkbook(
             ["Mail", "Name", "Workload", "Szenario", "Rolle"],
-            ["ben@example.com", "Ben Muster", "SAP-Rollout", "Onboarding", "Unbekannt"]);
+            [$"ben-{suffix}@example.com", "Ben Muster", "SAP-Rollout", "Onboarding", "Unbekannt"]);
 
         var result = await fx.Service.CommitAsync(tenant, stream, DefaultMapping(), "test", CancellationToken.None);
 
         Assert.Equal(1, result.NewGuestCount);
         Assert.NotEmpty(result.Rows[0].Warnings);
         Assert.Empty(result.Rows[0].MatchedRoleNames);
-        var guest = await fx.GuestRepo.GetByMailAsync(tenant, "ben@example.com", CancellationToken.None);
+        var guest = await fx.GuestRepo.GetByMailAsync(tenant, $"ben-{suffix}@example.com", CancellationToken.None);
         Assert.NotNull(guest);
     }
 
     [Fact]
     public async Task Commit_Twice_IsIdempotent()
     {
+        if (!EmulatorAvailable) { return; }
+
         var fx = Build();
-        var tenant = TenantContext.Create("guest-import-tenant-4");
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var tenant = TenantContext.Create($"guest-import-tenant-4-{suffix}");
         await SeedWorkloadAsync(fx, tenant);
 
         var mapping = DefaultMapping();
+        var mail = $"anna-{suffix}@example.com";
         using (var stream1 = BuildWorkbook(
             ["Mail", "Name", "Workload", "Szenario", "Rolle"],
-            ["anna@example.com", "Anna Muster", "SAP-Rollout", "Onboarding", "Disponent"]))
+            [mail, "Anna Muster", "SAP-Rollout", "Onboarding", "Disponent"]))
         {
             await fx.Service.CommitAsync(tenant, stream1, mapping, "test", CancellationToken.None);
         }
         using (var stream2 = BuildWorkbook(
             ["Mail", "Name", "Workload", "Szenario", "Rolle"],
-            ["anna@example.com", "Anna Muster", "SAP-Rollout", "Onboarding", "Disponent"]))
+            [mail, "Anna Muster", "SAP-Rollout", "Onboarding", "Disponent"]))
         {
             await fx.Service.CommitAsync(tenant, stream2, mapping, "test", CancellationToken.None);
         }
 
-        var guest = await fx.GuestRepo.GetByMailAsync(tenant, "anna@example.com", CancellationToken.None);
+        var guest = await fx.GuestRepo.GetByMailAsync(tenant, mail, CancellationToken.None);
         var assignments = await fx.AssignmentRepo.ListActiveByGuestAsync(tenant, guest!.Id, CancellationToken.None);
         Assert.Single(assignments);
     }
@@ -194,8 +230,11 @@ public class GuestImportServiceTests
     [Fact]
     public async Task Commit_ChangedDataForExistingGuest_CreatesReviewItemForForeignWorkloadOnly()
     {
+        if (!EmulatorAvailable) { return; }
+
         var fx = Build();
-        var tenant = TenantContext.Create("guest-import-tenant-5");
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var tenant = TenantContext.Create($"guest-import-tenant-5-{suffix}");
         var (workloadA, _, roleA) = await SeedWorkloadAsync(fx, tenant);
 
         // Zweiter Workload mit einer BESTEHENDEN Zuweisung fuer denselben Gast - simuliert
@@ -203,10 +242,11 @@ public class GuestImportServiceTests
         var workloadB = new Workload { PlatformTenantId = tenant.PlatformTenantId, Name = "Other-Workload" };
         await fx.WorkloadRepo.UpsertAsync(workloadB, CancellationToken.None);
 
+        var mail = $"anna-{suffix}@example.com";
         var guest = new GuestAccount
         {
             PlatformTenantId = tenant.PlatformTenantId, DirectoryTenantId = "dir-a",
-            Mail = "anna@example.com", DisplayName = "Anna Alt",
+            Mail = mail, DisplayName = "Anna Alt",
         };
         await fx.GuestRepo.UpsertAsync(guest, CancellationToken.None);
 
@@ -219,7 +259,7 @@ public class GuestImportServiceTests
 
         using var stream = BuildWorkbook(
             ["Mail", "Name", "Workload", "Szenario", "Rolle"],
-            ["anna@example.com", "Anna Neu", "SAP-Rollout", "Onboarding", "Disponent"]);
+            [mail, "Anna Neu", "SAP-Rollout", "Onboarding", "Disponent"]);
 
         await fx.Service.CommitAsync(tenant, stream, DefaultMapping(), "test", CancellationToken.None);
 

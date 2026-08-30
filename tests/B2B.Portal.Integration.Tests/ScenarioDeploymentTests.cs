@@ -6,7 +6,9 @@ using B2B.Portal.Application.Services;
 using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.ValueObjects;
 using B2B.Portal.Infrastructure.Data;
+using B2B.Portal.Infrastructure.Data.Cosmos;
 using B2B.Portal.Infrastructure.Queue;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -14,15 +16,35 @@ namespace B2B.Portal.Integration.Tests;
 
 /// <summary>
 /// End-to-End-Test für den Szenario-Deploy-Fluss (Command → Job → Worker-Handler,
-/// analog zum bestehenden GrantWorkloadRole-Fluss), gegen InMemory-Repositories — deckt
-/// den kompletten Weg ab: Workload+Ressourcen anlegen, WorkloadScenario mit
-/// ScenarioResourceRules (freie Fields + optionale Bedingung pro Regel) anlegen,
-/// DeployScenarioCommandHandler aufrufen, den resultierenden Job über
-/// JobDispatcher/DeployScenarioHandler verarbeiten, und verifizieren dass der Connector
-/// nur die Ressourcen der Regeln mit erfüllter Bedingung erhalten hat.
+/// analog zum bestehenden GrantWorkloadRole-Fluss), gegen den echten lokalen Cosmos DB
+/// Emulator (InMemory-Repositories entfernt) — deckt den kompletten Weg ab: Workload+
+/// Ressourcen anlegen, WorkloadScenario mit ScenarioResourceRules (freie Fields +
+/// optionale Bedingung pro Regel) anlegen, DeployScenarioCommandHandler aufrufen, den
+/// resultierenden Job über JobDispatcher/DeployScenarioHandler verarbeiten, und
+/// verifizieren dass der Connector nur die Ressourcen der Regeln mit erfüllter Bedingung
+/// erhalten hat. Übersprungen (frühes return), wenn kein Emulator läuft (siehe
+/// CosmosEmulatorAvailability) — dotnet test bleibt CI-sicher. Nutzt pro Testlauf
+/// eindeutige Tenant-IDs (Guid-Suffix), damit parallele/wiederholte Testläufe sich nicht
+/// gegenseitig über bereits vorhandene Cosmos-Dokumente stören.
 /// </summary>
 public class ScenarioDeploymentTests
 {
+    private static readonly bool EmulatorAvailable = CosmosEmulatorAvailability.IsRunning();
+
+    private static CosmosClientFactory BuildFactory()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["COSMOS_EMULATOR_ENDPOINT"] = "https://localhost:8081",
+                ["COSMOS_EMULATOR_KEY"] =
+                    "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==",
+                ["COSMOS_DATABASE_ID"] = "b2b-governance-dev",
+            })
+            .Build();
+        return new CosmosClientFactory(config);
+    }
+
     private sealed class RecordingResourceConnector : IResourceConnector
     {
         public string ResourceType => "SecurityGroup";
@@ -45,13 +67,17 @@ public class ScenarioDeploymentTests
     [Fact]
     public async Task DeployScenario_WithMetCondition_DeploysResourceViaConnector()
     {
-        var tenant = TenantContext.Create("scenario-e2e-tenant");
-        var workloadRepo = new InMemoryWorkloadRepository();
-        var scenarioRepo = new InMemoryWorkloadScenarioRepository();
-        var jobRepo = new InMemoryJobRepository();
-        var queue = new LocalJobQueue();
+        if (!EmulatorAvailable) { return; }
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var tenant = TenantContext.Create($"scenario-e2e-tenant-{suffix}");
+        var factory = BuildFactory();
+        var workloadRepo = new CosmosWorkloadRepository(factory);
+        var scenarioRepo = new CosmosWorkloadScenarioRepository(factory);
+        var jobRepo = new CosmosJobRepository(factory);
+        var queue = new CosmosJobQueue(factory);
         var clock = new SystemClock();
-        var auditService = new AuditService(new InMemoryAuditWriter(), clock);
+        var auditService = new AuditService(new CosmosAuditWriter(factory), clock);
         var provisioningService = new ProvisioningService(jobRepo, queue, clock);
 
         var workload = new Workload { PlatformTenantId = tenant.PlatformTenantId, Name = "Test-Workload" };
@@ -98,13 +124,17 @@ public class ScenarioDeploymentTests
     [Fact]
     public async Task DeployScenario_WithUnmetCondition_DoesNotDeployResource()
     {
-        var tenant = TenantContext.Create("scenario-e2e-tenant-unmet");
-        var workloadRepo = new InMemoryWorkloadRepository();
-        var scenarioRepo = new InMemoryWorkloadScenarioRepository();
-        var jobRepo = new InMemoryJobRepository();
-        var queue = new LocalJobQueue();
+        if (!EmulatorAvailable) { return; }
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var tenant = TenantContext.Create($"scenario-e2e-tenant-unmet-{suffix}");
+        var factory = BuildFactory();
+        var workloadRepo = new CosmosWorkloadRepository(factory);
+        var scenarioRepo = new CosmosWorkloadScenarioRepository(factory);
+        var jobRepo = new CosmosJobRepository(factory);
+        var queue = new CosmosJobQueue(factory);
         var clock = new SystemClock();
-        var auditService = new AuditService(new InMemoryAuditWriter(), clock);
+        var auditService = new AuditService(new CosmosAuditWriter(factory), clock);
         var provisioningService = new ProvisioningService(jobRepo, queue, clock);
 
         var workload = new Workload { PlatformTenantId = tenant.PlatformTenantId, Name = "Prod-Only-Workload" };
@@ -150,13 +180,17 @@ public class ScenarioDeploymentTests
     [Fact]
     public async Task ImportTemplate_ThenDeploy_UsesWorkloadResourcesAndDeploysOnlyMatchingRule()
     {
-        var tenant = TenantContext.Create("scenario-e2e-tenant-import");
-        var workloadRepo = new InMemoryWorkloadRepository();
-        var scenarioRepo = new InMemoryWorkloadScenarioRepository();
-        var jobRepo = new InMemoryJobRepository();
-        var queue = new LocalJobQueue();
+        if (!EmulatorAvailable) { return; }
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var tenant = TenantContext.Create($"scenario-e2e-tenant-import-{suffix}");
+        var factory = BuildFactory();
+        var workloadRepo = new CosmosWorkloadRepository(factory);
+        var scenarioRepo = new CosmosWorkloadScenarioRepository(factory);
+        var jobRepo = new CosmosJobRepository(factory);
+        var queue = new CosmosJobQueue(factory);
         var clock = new SystemClock();
-        var auditService = new AuditService(new InMemoryAuditWriter(), clock);
+        var auditService = new AuditService(new CosmosAuditWriter(factory), clock);
         var provisioningService = new ProvisioningService(jobRepo, queue, clock);
         var importExportService = new ScenarioImportExportService(workloadRepo, scenarioRepo, auditService);
 
@@ -221,11 +255,15 @@ public class ScenarioDeploymentTests
     [Fact]
     public async Task DeleteScenario_RemovesOrphanedResources_ButKeepsResourcesStillReferenced()
     {
-        var tenant = TenantContext.Create("scenario-e2e-tenant-delete");
-        var workloadRepo = new InMemoryWorkloadRepository();
-        var scenarioRepo = new InMemoryWorkloadScenarioRepository();
+        if (!EmulatorAvailable) { return; }
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var tenant = TenantContext.Create($"scenario-e2e-tenant-delete-{suffix}");
+        var factory = BuildFactory();
+        var workloadRepo = new CosmosWorkloadRepository(factory);
+        var scenarioRepo = new CosmosWorkloadScenarioRepository(factory);
         var clock = new SystemClock();
-        var auditService = new AuditService(new InMemoryAuditWriter(), clock);
+        var auditService = new AuditService(new CosmosAuditWriter(factory), clock);
         var importExportService = new ScenarioImportExportService(workloadRepo, scenarioRepo, auditService);
 
         var workload = new Workload { PlatformTenantId = tenant.PlatformTenantId, Name = "Delete-Test-Workload" };

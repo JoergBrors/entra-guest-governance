@@ -105,6 +105,7 @@ internal sealed class DirectoryOperationDocument
     [JsonPropertyName("lastError")] public string? LastError { get; init; }
     [JsonPropertyName("createdAt")] public required DateTimeOffset CreatedAt { get; init; }
     [JsonPropertyName("updatedAt")] public required DateTimeOffset UpdatedAt { get; init; }
+    [JsonPropertyName("log")] public List<JobLogEntryDocument> Log { get; init; } = [];
 
     public static DirectoryOperationDocument FromEntity(DirectoryOperation op) => new()
     {
@@ -123,6 +124,7 @@ internal sealed class DirectoryOperationDocument
         LastError = op.LastError,
         CreatedAt = op.CreatedAt,
         UpdatedAt = op.UpdatedAt,
+        Log = [.. op.Log.Select(l => new JobLogEntryDocument(l.Timestamp, l.Status, l.Message))],
     };
 
     public DirectoryOperation ToEntity() => new()
@@ -142,5 +144,11 @@ internal sealed class DirectoryOperationDocument
         LastError = LastError,
         CreatedAt = CreatedAt,
         UpdatedAt = UpdatedAt,
+        Log = [.. Log.Select(l => new JobLogEntry(l.Timestamp, l.Status, l.Message))],
     };
 }
+
+internal sealed record JobLogEntryDocument(
+    [property: JsonPropertyName("timestamp")] DateTimeOffset Timestamp,
+    [property: JsonPropertyName("status")] JobStatus Status,
+    [property: JsonPropertyName("message")] string? Message);

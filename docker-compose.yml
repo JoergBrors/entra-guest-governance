@@ -4,7 +4,6 @@ x-portal-env: &portal-env
   B2B_MODE: LOCAL_MOCK
   DIRECTORY_PROVIDER: mock
   EMAIL_PROVIDER: mock
-  DATA_PROVIDER: cosmos
   JOB_QUEUE_PROVIDER: cosmos
   ALLOW_GRAPH_WRITES: "false"
   ALLOW_GUEST_DELETE: "false"

@@ -8,5 +8,7 @@ Accepted
 
 ## Entscheidung
 
-`LOCAL_MOCK` kann gegen Cosmos DB Emulator laufen. `DATA_PROVIDER=local` bleibt als InMemory-Option.
+`LOCAL_MOCK` laeuft gegen Cosmos DB Emulator. Cosmos DB ist der einzige Datenprovider —
+die InMemory-Option wurde entfernt (Erweiterung 2026-08-30 (Teil 2), siehe
+`docs/architecture/mvp-test-report.md`).
 

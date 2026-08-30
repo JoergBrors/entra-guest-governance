@@ -26,6 +26,22 @@ const useStyles = makeStyles({
   },
   meta: { color: tokens.colorNeutralForeground3, overflowWrap: 'anywhere' },
   actions: { display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' },
+  log: {
+    gridColumn: '1 / -1',
+    marginTop: '8px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  logEntry: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(150px, auto) minmax(80px, auto) 1fr',
+    gap: '8px',
+    fontFamily: 'monospace',
+    fontSize: tokens.fontSizeBase200,
+    padding: '2px 0',
+    borderBottom: `1px solid ${tokens.colorNeutralStroke3}`,
+  },
 });
 
 export function JobsPage() {
@@ -108,6 +124,17 @@ export function JobsPage() {
                   <Text className={styles.meta}>Erstellt: {new Date(job.createdAt).toLocaleString()}</Text>
                   <Text className={styles.meta}>Aktualisiert: {new Date(job.updatedAt).toLocaleString()}</Text>
                   {job.lastError && <Text className={styles.meta}>Meldung: {job.lastError}</Text>}
+                  <div className={styles.log}>
+                    <Text weight="semibold" size={200}>Verlauf</Text>
+                    {job.log.length === 0 && <Text className={styles.meta} size={200}>Kein Log vorhanden.</Text>}
+                    {job.log.map((entry, i) => (
+                      <div key={i} className={styles.logEntry}>
+                        <Text size={200}>{new Date(entry.timestamp).toLocaleString()}</Text>
+                        <Badge appearance="tint" color={statusColor(entry.status)} size="small">{entry.status}</Badge>
+                        <Text size={200} className={styles.meta}>{entry.message ?? '—'}</Text>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </Card>

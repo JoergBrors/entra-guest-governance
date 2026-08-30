@@ -4,7 +4,7 @@ using B2B.Portal.Domain.ValueObjects;
 namespace B2B.Portal.Application.Ports;
 
 /// <summary>
-/// Abstraktion für die Job Queue. PoC nutzt LocalJobQueue, Produktion z.B.
+/// Abstraktion für die Job Queue. PoC/Development nutzt CosmosJobQueue, Produktion z.B.
 /// Azure Service Bus (Blueprint 19.4 "IJobQueue: CosmosJobQueue (PoC) / ServiceBusJobQueue").
 /// </summary>
 public interface IJobQueue

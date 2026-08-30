@@ -24,7 +24,14 @@ public sealed class DirectoryOperation
     public string? LastError { get; set; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public List<JobLogEntry> Log { get; init; } = [];
 }
+
+/// <summary>
+/// Ein Eintrag im Verlauf einer DirectoryOperation (Statuswechsel, Fehler) — fuer die
+/// detaillierte Job-Log-Ansicht in der Jobs-Admin-UI (GET /api/jobs/{id}).
+/// </summary>
+public sealed record JobLogEntry(DateTimeOffset Timestamp, JobStatus Status, string? Message);
 
 /// <summary>
 /// Einheitlicher Job Envelope, wie er über die IJobQueue an den Worker übergeben wird

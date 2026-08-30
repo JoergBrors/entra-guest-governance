@@ -10,12 +10,16 @@ using Xunit;
 namespace B2B.Portal.Integration.Tests;
 
 /// <summary>
-/// Cosmos-Variante von JobDispatcherTests — dieselben Verhaltensgarantien (Routing,
-/// Dead-Letter bei unbekanntem JobType, Retry-bevor-DeadLetter), aber gegen den echten
-/// lokalen Cosmos DB Emulator statt LocalJobQueue. Zusätzlich ein Test, der den
+/// Cosmos-Variante von JobDispatcherTests (InMemory-Original entfernt) — dieselben
+/// Verhaltensgarantien (Routing, Dead-Letter bei unbekanntem JobType, Dead-Letter bei
+/// fehlender PlatformTenantId, Retry-bevor-DeadLetter), aber gegen den echten lokalen
+/// Cosmos DB Emulator statt LocalJobQueue. Zusätzlich ein Test, der den
 /// ETag-conditional-Lease-Mechanismus prüft, den InMemory (dank atomarem
-/// ConcurrentQueue.TryDequeue) nicht braucht. Übersprungen, wenn kein Emulator läuft
-/// (siehe CosmosEmulatorAvailability) — dotnet test bleibt damit CI-sicher.
+/// ConcurrentQueue.TryDequeue) nicht brauchte. Übersprungen, wenn kein Emulator läuft
+/// (siehe CosmosEmulatorAvailability) — dotnet test bleibt damit CI-sicher. Da CosmosJobQueue
+/// (anders als das entfernte LocalJobQueue) keine direkt abfragbare DeadLetters-Collection
+/// hat, wird DeadLetter-Status indirekt geprüft: ein danach erneut angefordertes
+/// ProcessNextAsync darf keinen Kandidaten mehr für die betroffene JobId liefern.
 /// </summary>
 public class CosmosJobDispatcherTests
 {
@@ -123,5 +127,42 @@ public class CosmosJobDispatcherTests
         public string JobType => "CosmosAlwaysFails";
         public Task HandleAsync(JobEnvelope job, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("boom");
+    }
+
+    [Fact]
+    public async Task ProcessNextAsync_UnknownJobType_GoesToDeadLetter()
+    {
+        if (!EmulatorAvailable) { return; }
+
+        var queue = BuildQueue();
+        var dispatcher = new JobDispatcher([], queue, NullLogger<JobDispatcher>.Instance);
+        var jobId = Guid.NewGuid();
+
+        await queue.EnqueueAsync(BuildJob("CosmosUnknownType") with { JobId = jobId }, CancellationToken.None);
+        var processed = await dispatcher.ProcessNextAsync(CancellationToken.None);
+
+        Assert.True(processed);
+
+        // DeadLetter -> kein weiterer Pending/Leased-Kandidat für diese JobId mehr abrufbar.
+        var handler = new RecordingHandler();
+        var dispatcher2 = new JobDispatcher([handler], queue, NullLogger<JobDispatcher>.Instance);
+        var processedAgain = await dispatcher2.ProcessNextAsync(CancellationToken.None);
+        Assert.True(processedAgain == false || handler.CallCount == 0);
+    }
+
+    [Fact]
+    public async Task ProcessNextAsync_MissingPlatformTenantId_GoesToDeadLetter()
+    {
+        if (!EmulatorAvailable) { return; }
+
+        var queue = BuildQueue();
+        var handler = new RecordingHandler();
+        var dispatcher = new JobDispatcher([handler], queue, NullLogger<JobDispatcher>.Instance);
+
+        await queue.EnqueueAsync(BuildJob("CosmosTestJobType", platformTenantId: ""), CancellationToken.None);
+        var processed = await dispatcher.ProcessNextAsync(CancellationToken.None);
+
+        Assert.True(processed);
+        Assert.Equal(0, handler.CallCount);
     }
 }

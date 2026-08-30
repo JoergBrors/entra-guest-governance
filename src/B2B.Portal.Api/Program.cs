@@ -114,6 +114,7 @@ app.MapPost("/api/jobs/{id:guid}/stop", async (
     job.Status = JobStatus.Cancelled;
     job.LastError = $"Gestoppt durch {userCtx.Current.Mail}.";
     job.UpdatedAt = DateTimeOffset.UtcNow;
+    job.Log.Add(new JobLogEntry(job.UpdatedAt, JobStatus.Cancelled, job.LastError));
     await jobRepository.UpsertAsync(job, ct);
     await jobQueue.CancelAsync(id, ct);
 
@@ -1460,7 +1461,8 @@ static async Task<JobStatusResponse> ToJobStatusResponseAsync(
     return new JobStatusResponse(
         job.Id, job.JobType, job.EntityType, job.EntityId,
         job.TriggeredBy, workloadId, workloadName,
-        job.Status.ToString(), job.RetryCount, job.LastError, job.CreatedAt, job.UpdatedAt);
+        job.Status.ToString(), job.RetryCount, job.LastError, job.CreatedAt, job.UpdatedAt,
+        [.. job.Log.Select(l => new JobLogEntryResponse(l.Timestamp, l.Status.ToString(), l.Message))]);
 }
 
 static async Task HydrateMockEntraFromRepositoriesAsync(
@@ -1597,7 +1599,9 @@ public sealed record JobStatusResponse(
     int RetryCount,
     string? LastError,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    IReadOnlyList<JobLogEntryResponse> Log);
+public sealed record JobLogEntryResponse(DateTimeOffset Timestamp, string Status, string? Message);
 public sealed record WorkloadMutationResponse(Workload Workload, Guid? PatternSyncJobId);
 public sealed record UpsertMockEntraUserBody(
     string? ObjectId,

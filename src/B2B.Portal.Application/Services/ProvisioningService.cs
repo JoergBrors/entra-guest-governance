@@ -40,6 +40,7 @@ public sealed class ProvisioningService(IJobRepository jobRepository, IJobQueue 
             Status = JobStatus.Pending,
             CreatedAt = clock.UtcNow,
             UpdatedAt = clock.UtcNow,
+            Log = [new JobLogEntry(clock.UtcNow, JobStatus.Pending, "Job erstellt und in Queue eingereiht.")],
         };
 
         await jobRepository.UpsertAsync(operation, ct);

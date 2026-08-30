@@ -259,10 +259,49 @@ Nicht in dieser Runde verifiziert:
 
 - Live-Start des Docker-Compose-Stacks (`docker compose up --build`) — nur Konfigurationspruefung, kein tatsaechlicher Container-Lauf.
 
+## 12. Erweiterung 2026-08-30 (Teil 2): Cosmos DB als einziger Datenprovider
+
+InMemory-Repositories (`InMemoryGuestAccountRepository`, `InMemoryWorkloadRepository`,
+`InMemoryAssignmentRepository`, `InMemoryReviewRepository`, `InMemoryJobRepository`,
+`InMemoryResourceAccessRepository`, `InMemoryWorkloadScenarioRepository`,
+`InMemoryExternalOrganizationRepository`, `InMemoryAuditWriter`) sowie `LocalJobQueue`
+vollständig entfernt — Cosmos DB ist jetzt der einzige Datenprovider, ohne
+`DATA_PROVIDER`-Umschaltung. `InfrastructureServiceCollectionExtensions` registriert die
+Cosmos-Implementierungen unconditional. `SystemClock` (kein Mock, echte UTC-Zeitquelle)
+in eigene Datei `src/B2B.Portal.Infrastructure/Data/SystemClock.cs` verschoben.
+
+Betroffene Tests gegen den echten lokalen Cosmos DB Emulator umgestellt (Muster:
+`CosmosClientFactory` aus In-Memory-`IConfigurationBuilder`, `EmulatorAvailable`-Check per
+`CosmosEmulatorAvailability`, frühes `return` in jedem Fact, eindeutige Tenant-/Entity-IDs
+per Guid-Suffix): `ScenarioDeploymentTests`, `WorkloadManagementServiceTests`,
+`GuestImportServiceTests`, `GrantWorkloadRoleIdempotencyTests` (neu:
+`Microsoft.Extensions.Configuration`/`.Binder`-Paketreferenz plus eigene
+`CosmosEmulatorAvailability`-Kopie in `B2B.Portal.Application.Tests`, keine
+Projektreferenz auf `B2B.Portal.Integration.Tests`). `TenantIsolationTests` und
+`JobDispatcherTests` (InMemory-Originale) gelöscht statt umgeschrieben — vollständig durch
+`CosmosTenantIsolationTests` bzw. `CosmosJobDispatcherTests` abgedeckt;
+`CosmosJobDispatcherTests` um die beiden fehlenden Fälle (unbekannter JobType, fehlende
+PlatformTenantId → DeadLetter) ergänzt. `ApiSmokeTests` (`WebApplicationFactory<Program>`)
+konfiguriert jetzt explizit Cosmos-Emulator-Settings statt sich auf `appsettings.json`/
+`.env.local` zu verlassen, und überspringt jeden Fact, der ein Repository berührt, ohne
+laufenden Emulator.
+
+Dokumentation bereinigt: `DATA_PROVIDER` aus `appsettings.json`, `.env.example`,
+`docker-compose.yml`, README.md, `docs/architecture/data-storage.md` und
+`docs/adr/ADR-003-cosmos-development-storage.md` entfernt (historische Prompt-Logs unter
+`docs/prompts/` bewusst unverändert belassen).
+
+Ausgefuehrte Checks:
+
+| Check | Ergebnis |
+| --- | --- |
+| `dotnet build -c Debug` | erfolgreich, 0 Warnungen, 0 Fehler |
+| `dotnet test -c Debug` | erfolgreich, 78 Tests bestanden (Domain 29, Architecture 5, Application 3, Integration 41), 0 fehlgeschlagen — Cosmos-Emulator lief in dieser Umgebung, alle Cosmos-Tests liefen echt (nicht nur uebersprungen) |
+
 ## Gesamtstatus
 
 **PASS WITH PENDING INTEGRATIONS** — Frontend und Backend bauen und testen vollständig
-grün (83 Backend-Tests: Domain 29, Architecture 5, Application 3, Integration 46; 5/5 Frontend-Tests). Offen bleiben ausschließlich die bewusst
+grün (78 Backend-Tests: Domain 29, Architecture 5, Application 3, Integration 41; 5/5 Frontend-Tests, Frontend-Zahl nicht in dieser Runde erneut verifiziert). Offen bleiben ausschließlich die bewusst
 nicht simulierten externen Integrationen (echter Graph-Write, echter Mail-Versand,
 Token-Validierung), die in Abschnitt 7/8 genannten funktionalen Lücken sowie der in
 Abschnitt 11 genannte fehlende Live-Verifikationslauf des Docker-Compose-Stacks.

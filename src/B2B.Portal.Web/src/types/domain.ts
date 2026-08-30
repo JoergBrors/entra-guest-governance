@@ -55,6 +55,12 @@ export interface Workload {
 
 export type JobStatus = 'Pending' | 'Running' | 'Success' | 'Retry' | 'Failed' | 'DeadLetter' | 'Cancelled';
 
+export interface JobLogEntryResponse {
+  timestamp: string;
+  status: JobStatus;
+  message?: string | null;
+}
+
 export interface JobStatusResponse {
   id: string;
   jobType: string;
@@ -68,6 +74,7 @@ export interface JobStatusResponse {
   lastError?: string | null;
   createdAt: string;
   updatedAt: string;
+  log: JobLogEntryResponse[];
 }
 
 export interface WorkloadMutationResponse {
