@@ -472,6 +472,97 @@ provozieren (Handler behandeln fehlende Fachdaten defensiv als No-op statt Excep
 Restart-Happy-Path (Payload lesen, `EnqueueJobAsync` erneut aufrufen) ist damit nur
 code-verifiziert, nicht live gegen einen echten Failed-Job getestet.
 
+## 16. Erweiterung 2026-08-30 (Teil 6): Guest Pool Filter, Invitation Reminder Worker, Erinnerungs-Policy, Mail Monitor
+
+Vier zusammenhaengende Ergaenzungen: (1) Guest-Pool-Filter nach Workload/Szenario/Status/
+Einladungsstatus, (2) ein echter periodischer `InvitationReminderWorker` fuer
+`JobTypes.InvitationReminder` (vorher Konstante ohne Handler/Trigger), (3) eine voll
+admin-konfigurierbare mehrstufige Erinnerungs-Policy statt hartkodierter Defaults, (4) ein
+Mail Monitor, der `MockEmailProvider.Sink` (vorher nirgends erreichbar) sichtbar macht.
+
+Backend:
+
+- `GuestAccount.cs`: neue Felder `InvitationRedemptionLink` (Mock-Redemption-Link, deterministisch
+  bei Invite gesetzt — KEIN echter Entra-Link), `LastReminderStageSent`/`LastReminderSentAt`
+  (Idempotenz-Tracking fuer den Reminder-Scanner).
+- `ReminderPolicy.cs` (neu): `ReminderPolicy`/`ReminderStage` — genau eine geordnete
+  Stufenliste pro `PlatformTenantId`, Template-Felder direkt auf der Stufe (kein separates
+  Template-Entity).
+- `IReminderPolicyRepository` (neu, `CorePorts.cs`) + `CosmosReminderPolicyRepository` (neu) —
+  Cosmos-Container `discovery`, disambiguiert per `entityType = "ReminderPolicy"`, exakt das
+  Muster von `CosmosMockEntraUserRepository`. Registriert in
+  `InfrastructureServiceCollectionExtensions`.
+- `InvitationReminderHandler` (neu, `Handlers/Invitation/InvitationHandler.cs`, JobType
+  `InvitationReminder`): rendert Betreff/Text per einfacher `{{Platzhalter}}`-Ersetzung
+  (`DisplayName`, `WorkloadName`, `DaysSinceInvite`, `RedemptionLink`), sendet ueber
+  `IEmailProvider`, schreibt `LastReminderStageSent`/`LastReminderSentAt` fort.
+- `InvitationReminderWorker.cs` (neu): zweiter `BackgroundService` neben
+  `ApplicationSignInSyncWorker` (gleiches 10-Minuten-`PeriodicTimer`-Muster, nur unter
+  `LOCAL_MOCK` registriert). Scannt Gaeste im Zustand `Invited` gegen die
+  `ReminderPolicy`-Stufen und enqueued pro faelliger Stufe genau einen Job — Idempotenz ueber
+  `LastReminderStageSent` (Stufe N+1 nur, wenn N zuletzt gesendet wurde oder noch nie
+  gesendet wurde fuer Stufe 1).
+- `InvitationHandler.HandleAsync`: setzt jetzt zusaetzlich `InvitationRedemptionLink`.
+- `GET /api/guest-accounts`: neue optionale Query-Parameter `workloadId`, `scenarioId`,
+  `accountState`, `invitationStatus` — serverseitige Filterung ueber
+  `GuestWorkloadAssignment`/`WorkloadScenario` (neue Hilfsfunktion `FilterGuestsAsync`).
+- `GET /api/me/managed-guests` (neu): mirrort die Scoping-Logik von `GET /api/me/workloads`
+  (`CanManageWorkload`/`ScenarioManagerWorkloadIds`, kein GovernanceAdmin noetig) — liefert
+  dieselbe gefilterte Gaesteliste, beschraenkt auf selbst verwaltete Workloads.
+- `GET/PUT /api/reminder-policy` (neu, GovernanceAdmin-only): liest/ersetzt die komplette
+  geordnete Stufenliste des Tenants.
+- `GET /api/dev/mail-sink` (neu, LOCAL_MOCK-only, GovernanceAdmin-only): exponiert
+  `MockEmailProvider.SinkWithTimestamps()` (neue Methode, parallele Zeitstempel-Liste statt
+  Aenderung des bestehenden `EmailMessage`-Records, um Bruchstellen an allen
+  Positions-Konstruktor-Aufrufstellen zu vermeiden — siehe `MockEmailProviderTests`,
+  `NotificationHandler`, `InvitationReminderHandler`).
+- `/api/me/navigation`: neue Eintraege "Erinnerungs-Policy", "Mail Monitor" fuer
+  GovernanceAdmin.
+
+Frontend:
+
+- `GuestPoolPage.tsx`: Filterleiste (Workload/Szenario/Status/Einladungsstatus, Szenario-Dropdown
+  nur aktiv nach Workload-Auswahl), neue Spalten "Einladung", "Reminder", "Redemption-Link (Mock)".
+- `MyWorkloadsPage.tsx`: neuer Abschnitt "Gäste meiner Workloads" ÜBER der bestehenden
+  "Meine Workloads"-Liste, nur gerendert wenn `canManageWorkloads` (neue optionale Prop,
+  Default `false` — Bestandstest `MyWorkloadsPage.test.tsx` rendert ohne Prop und bleibt
+  dadurch unveraendert gruen). Nutzt `GET /api/me/managed-guests`.
+- `components/InvitationGuestList.tsx` (neu): gemeinsame Tabellen-Komponente
+  Gast+Einladungsstatus+Reminder+Redemption-Link, genutzt von `MyWorkloadsPage`.
+- `pages/ReminderPolicyPage.tsx` (neu, Route `/reminder-policy`): Stufen hinzufuegen/entfernen/
+  neu ordnen (↑/↓), Tage-Schwelle/Template-ID/Betreff/Text pro Stufe editierbar, Speichern per
+  `PUT /api/reminder-policy`.
+- `pages/MailMonitorPage.tsx` (neu, Route `/mail-monitor`): Polling wie `JobsPage`
+  (5s-Intervall), neueste E-Mails zuerst.
+- `AppLayout.tsx`: neue Nav-Eintraege "Erinnerungs-Policy", "Mail Monitor" im
+  GOVERNANCE-Admin-Bereich.
+- `api/client.ts`: `listGuests(filter)` (jetzt mit optionalen Query-Parametern),
+  `listManagedGuests`, `getReminderPolicy`, `updateReminderPolicy`, `listMailSink`.
+- `types/domain.ts`: `GuestAccount` um `invitationRedemptionLink`/`lastReminderStageSent`/
+  `lastReminderSentAt` erweitert, neue Typen `ReminderPolicy`/`ReminderStage`/`MailSinkEntry`,
+  Hilfsfunktion `invitationStatusOf(state)`.
+
+Verifikation: `dotnet build` fuer alle Nicht-Api/Worker-Projekte (Domain, Application,
+Infrastructure, Domain.Tests, Application.Tests, Architecture.Tests) mit 0 Fehlern/Warnungen;
+`dotnet test` fuer Domain.Tests (29/29), Application.Tests (3/3, inkl. angepasstem
+`MockEmailProviderTests`), Architecture.Tests (5/5, bestaetigt dass `IReminderPolicyRepository`
+in `Application` liegt und `Infrastructure` nicht referenziert). `npm run build` (0
+TS-Fehler) und `npm run test -- --run` (5/5 bestanden, inkl. beider
+`MyWorkloadsPage.test.tsx`-Assertions — "keine Graph-Details in der normalen User-Ansicht"
+bleibt intakt, da `canManageWorkloads` im Test-Render nicht gesetzt ist).
+
+Ein vollstaendiger `dotnet build`/`dotnet test` ueber die GESAMTE Solution (inkl. Api, Worker,
+Integration.Tests) sowie ein Live-Smoke-Test gegen neu gestartete Api/Worker-Prozesse waren
+in dieser Session durch zwei bereits laufende VS-Code-Debug-Sessions auf `B2B.Portal.Api` und
+`B2B.Portal.Worker` blockiert (Datei-Sperre auf `bin/Debug/net10.0/*.dll` beim Kopieren nach
+dem Build — reine Kopiersperre, KEIN Kompilierfehler: alle Build-Logs zeigen ausschliesslich
+`MSB3021`/`MSB3027`-Kopierfehler, keinen einzigen `CS`-Fehler). Domain/Application/
+Infrastructure (die Bibliotheken, von denen Api/Worker abhaengen) sowie alle Nicht-Api/Worker-
+Testprojekte wurden einzeln erfolgreich gebaut und getestet, um Compile-Korrektheit
+sicherzustellen; der End-to-End-Live-Test (Reminder-Policy setzen, Redemption-Link pruefen,
+Reminder-Job manuell ausloesen, Mail-Sink pruefen, Guest-Pool-Filter live testen) steht noch
+aus und sollte nachgeholt werden, sobald die Debug-Sessions beendet sind.
+
 ## Gesamtstatus
 
 **PASS WITH PENDING INTEGRATIONS** — Frontend und Backend bauen und testen vollständig

@@ -8,6 +8,8 @@ import type {
   MockEntraApplication, MockEntraApplicationSignIn, MockEntraGroup, MockEntraMembership, MockEntraUser,
   ScenarioUser,
   WorkloadMutationResponse,
+  GuestAccountState,
+  ReminderPolicy, ReminderStage, ReminderStagePreview, MailSinkEntry,
 } from '../types/domain';
 import { getToken } from '../auth/token';
 
@@ -163,10 +165,29 @@ export const api = {
   listMockEntraApplicationSignIns: (appId?: string | null) =>
     request<MockEntraApplicationSignIn[]>(`/api/dev/mock-entra/application-signins${appId ? `?appId=${encodeURIComponent(appId)}` : ''}`),
 
-  listGuests: () => request<GuestAccount[]>('/api/guest-accounts'),
+  // Erweiterung 2026-08-30 "Guest Pool Filter": optionale Filter werden als Query-Parameter
+  // angehaengt und serverseitig ausgewertet (siehe FilterGuestsAsync, Program.cs).
+  listGuests: (filter?: {
+    workloadId?: string; scenarioId?: string; accountState?: GuestAccountState; invitationStatus?: 'accepted' | 'pending';
+  }) => {
+    const params = new URLSearchParams();
+    if (filter?.workloadId) params.set('workloadId', filter.workloadId);
+    if (filter?.scenarioId) params.set('scenarioId', filter.scenarioId);
+    if (filter?.accountState) params.set('accountState', filter.accountState);
+    if (filter?.invitationStatus) params.set('invitationStatus', filter.invitationStatus);
+    const query = params.toString();
+    return request<GuestAccount[]>(`/api/guest-accounts${query ? `?${query}` : ''}`);
+  },
   getGuest: (id: string) => request<GuestAccount>(`/api/guest-accounts/${id}`),
   listGuestAssignments: (guestId: string) =>
     request<GuestWorkloadAssignment[]>(`/api/guest-accounts/${guestId}/assignments`),
+  resendInvitation: (guestId: string) =>
+    request<{ jobId: string }>(`/api/guest-accounts/${guestId}/resend-invitation`, { method: 'POST' }),
+
+  // Erweiterung 2026-08-30 "Scoped Visibility fuer Workload-/Scenario-Owner": dieselbe
+  // gefilterte Gaesteliste wie listGuests, aber serverseitig auf die eigenen Workloads
+  // beschraenkt (siehe GET /api/me/managed-guests) — kein GovernanceAdmin noetig.
+  listManagedGuests: () => request<GuestAccount[]>('/api/me/managed-guests'),
 
   listWorkloads: () => request<Workload[]>('/api/workloads'),
   listMyWorkloads: () => request<Workload[]>('/api/me/workloads'),
@@ -319,4 +340,18 @@ export const api = {
     form.append('mapping', mappingToFormValue(mapping));
     return requestForm<GuestImportResult>('/api/guest-import/commit', form);
   },
+
+  getReminderPolicy: () => request<ReminderPolicy>('/api/reminder-policy'),
+  updateReminderPolicy: (stages: ReminderStage[]) =>
+    request<ReminderPolicy>('/api/reminder-policy', {
+      method: 'PUT',
+      body: JSON.stringify({ stages }),
+    }),
+  previewReminderStage: (templateSubject: string, templateBody: string) =>
+    request<ReminderStagePreview>('/api/reminder-policy/preview', {
+      method: 'POST',
+      body: JSON.stringify({ templateSubject, templateBody }),
+    }),
+
+  listMailSink: () => request<MailSinkEntry[]>('/api/dev/mail-sink'),
 };

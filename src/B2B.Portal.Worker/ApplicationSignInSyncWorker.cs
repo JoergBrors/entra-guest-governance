@@ -26,9 +26,27 @@ public sealed class ApplicationSignInSyncWorker(
 
     private async Task SyncAsync(CancellationToken ct)
     {
+        // Erweiterung 2026-08-30 (Teil 3 "Multi-Tenant-Scanner"): vorher genau ein
+        // hartkodierter Tenant (VITE_DEV_PLATFORM_TENANT_ID, eigentlich eine Frontend-
+        // Env-Variable) — jetzt alle im Mock-Stamm bekannten Tenants. Fallback auf den alten
+        // Default bleibt fuer den Fall, dass der Mock-Stamm noch komplett leer ist (frisch
+        // resettete Cosmos-DB vor dem ersten Login/Seed).
+        var tenantIds = mockEntraStore.ListKnownPlatformTenantIds();
+        if (tenantIds.Count == 0)
+        {
+            tenantIds = [configuration["VITE_DEV_PLATFORM_TENANT_ID"] ?? "dev-tenant-a"];
+        }
+
+        foreach (var tenantId in tenantIds)
+        {
+            await SyncTenantAsync(tenantId, ct);
+        }
+    }
+
+    private async Task SyncTenantAsync(string tenantId, CancellationToken ct)
+    {
         try
         {
-            var tenantId = configuration["VITE_DEV_PLATFORM_TENANT_ID"] ?? "dev-tenant-a";
             var tenant = TenantContext.Create(tenantId);
             var guests = await guestRepository.ListAsync(tenant, ct);
             var entraObjectIdsByGuestId = guests
@@ -60,14 +78,14 @@ public sealed class ApplicationSignInSyncWorker(
                 }
             }
 
-            logger.LogInformation("ApplicationSignInSyncWorker hat Mock-Entra-App-Logins synchronisiert.");
+            logger.LogInformation("ApplicationSignInSyncWorker hat Mock-Entra-App-Logins fuer Tenant {Tenant} synchronisiert.", tenantId);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "ApplicationSignInSyncWorker konnte Mock-Entra-App-Logins nicht synchronisieren.");
+            logger.LogWarning(ex, "ApplicationSignInSyncWorker konnte Mock-Entra-App-Logins fuer Tenant {Tenant} nicht synchronisieren.", tenantId);
         }
     }
 }

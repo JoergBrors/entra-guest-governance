@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Card, Title2, Text, Badge, Spinner, makeStyles } from '@fluentui/react-components';
+import { Card, Title2, Title3, Text, Badge, Spinner, makeStyles } from '@fluentui/react-components';
 import { api } from '../api/client';
-import type { Workload } from '../types/domain';
+import type { Workload, GuestAccount } from '../types/domain';
+import { InvitationGuestList } from '../components/InvitationGuestList';
 
 const useStyles = makeStyles({
   list: {
@@ -19,6 +20,11 @@ const useStyles = makeStyles({
     marginTop: '8px',
     flexWrap: 'wrap',
   },
+  managedSection: {
+    marginBottom: '28px',
+    paddingBottom: '20px',
+    borderBottom: '1px solid var(--border-color, #e1dfdd)',
+  },
 });
 
 /**
@@ -26,17 +32,34 @@ const useStyles = makeStyles({
  * eigene Rolle/Zugriffe. Keine Graph-Details, keine Entra Object IDs, keine
  * Connector-/Job-Informationen (Blueprint 9 "keine Graph-Details in der normalen
  * User-Ansicht").
+ *
+ * Erweiterung 2026-08-30 "Scoped Visibility fuer Workload-/Scenario-Owner": zusaetzlich, NUR
+ * fuer WorkloadOwner/ScenarioManager (bzw. GovernanceAdmin), ein Abschnitt ueber der
+ * bestehenden "Meine Workloads"-Liste mit den Gaesten der selbst verwalteten Workloads inkl.
+ * Einladungsstatus/Reminder/Redemption-Link — serverseitig gescoped ueber
+ * GET /api/me/managed-guests (dieselbe Scoping-Logik wie GET /api/me/workloads), damit ein
+ * normaler User (ohne diese Rollen) hier weiterhin NICHTS zusaetzliches sieht.
  */
-export function MyWorkloadsPage() {
+export function MyWorkloadsPage({ canManageWorkloads = false }: { canManageWorkloads?: boolean }) {
   const styles = useStyles();
   const [workloads, setWorkloads] = useState<Workload[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [managedGuests, setManagedGuests] = useState<GuestAccount[] | null>(null);
 
   useEffect(() => {
     api.listMyWorkloads()
       .then(setWorkloads)
       .catch((e: Error) => setError(e.message));
   }, []);
+
+  useEffect(() => {
+    if (!canManageWorkloads) {
+      return;
+    }
+    api.listManagedGuests()
+      .then(setManagedGuests)
+      .catch(() => setManagedGuests([]));
+  }, [canManageWorkloads]);
 
   if (error) {
     return <Text>Fehler beim Laden: {error}</Text>;
@@ -48,6 +71,20 @@ export function MyWorkloadsPage() {
 
   return (
     <div>
+      {canManageWorkloads && (
+        <div className={styles.managedSection}>
+          <Title3>Gäste meiner Workloads</Title3>
+          <Text>Einladungsstatus, Reminder und Mock-Redemption-Link für Gäste in Workloads/Szenarien, die du verwaltest.</Text>
+          {!managedGuests ? (
+            <Spinner label="Lade Gäste…" />
+          ) : (
+            <div style={{ marginTop: 12 }}>
+              <InvitationGuestList guests={managedGuests} />
+            </div>
+          )}
+        </div>
+      )}
+
       <Title2>Meine Workloads</Title2>
       <Text>Fachliche Rollen und Zugriffe, die dir aktuell zugewiesen sind.</Text>
 

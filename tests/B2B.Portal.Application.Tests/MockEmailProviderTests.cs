@@ -1,9 +1,29 @@
 using B2B.Portal.Application.Ports;
+using B2B.Portal.Domain.ValueObjects;
 using B2B.Portal.Infrastructure.Email;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace B2B.Portal.Application.Tests;
+
+/// <summary>In-Memory-Testdouble fuer IMailSinkRepository — MockEmailProvider braucht seit der
+/// Mail-Monitor-Erweiterung (2026-08-30) eine Persistenzabhaengigkeit, damit der Sink
+/// prozessuebergreifend (API/Worker getrennt) lesbar ist; fuer diesen Unit-Test reicht ein
+/// einfacher In-Memory-Stub statt Cosmos.</summary>
+internal sealed class InMemoryMailSinkRepository : IMailSinkRepository
+{
+    public List<(EmailMessage Message, DateTimeOffset SentAt)> Entries { get; } = [];
+
+    public Task AppendAsync(TenantContext tenant, EmailMessage message, DateTimeOffset sentAt, CancellationToken ct)
+    {
+        Entries.Add((message, sentAt));
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<(EmailMessage Message, DateTimeOffset SentAt)>> ListAsync(
+        TenantContext tenant, int take, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<(EmailMessage, DateTimeOffset)>>([.. Entries]);
+}
 
 /// <summary>
 /// Notification-Mock-Test (MVP-Dokument, TESTS / QUALITY GATES). Der Mock muss Sender,
@@ -15,7 +35,8 @@ public class MockEmailProviderTests
     [Fact]
     public async Task SendAsync_RecordsPreviewInSink_WithFullContext()
     {
-        var provider = new MockEmailProvider(NullLogger<MockEmailProvider>.Instance);
+        var mailSink = new InMemoryMailSinkRepository();
+        var provider = new MockEmailProvider(NullLogger<MockEmailProvider>.Instance, mailSink);
         var correlationId = Guid.NewGuid();
 
         var message = new EmailMessage(
@@ -24,7 +45,8 @@ public class MockEmailProviderTests
             TemplateId: "invitation-confirmed",
             TemplateData: new Dictionary<string, string> { ["GuestName"] = "Anna" },
             CorrelationId: correlationId,
-            WorkloadContext: "SAP S/4 Projekt");
+            WorkloadContext: "SAP S/4 Projekt",
+            PlatformTenantId: "dev-tenant-a");
 
         await provider.SendAsync(message, CancellationToken.None);
 
@@ -34,6 +56,9 @@ public class MockEmailProviderTests
         Assert.Equal("invitation-confirmed", recorded.TemplateId);
         Assert.Equal(correlationId, recorded.CorrelationId);
         Assert.Equal("SAP S/4 Projekt", recorded.WorkloadContext);
+
+        var persisted = Assert.Single(mailSink.Entries);
+        Assert.Equal(correlationId, persisted.Message.CorrelationId);
     }
 
     [Fact]
@@ -44,7 +69,7 @@ public class MockEmailProviderTests
 
         var message = new EmailMessage(
             "b2b-notifications@contoso.example", "anna@contoso.example", "template",
-            new Dictionary<string, string>(), Guid.NewGuid(), null);
+            new Dictionary<string, string>(), Guid.NewGuid(), null, "dev-tenant-a");
 
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => provider.SendAsync(message, CancellationToken.None));

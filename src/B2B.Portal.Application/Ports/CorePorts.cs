@@ -37,7 +37,11 @@ public sealed record EmailMessage(
     string TemplateId,
     IReadOnlyDictionary<string, string> TemplateData,
     Guid CorrelationId,
-    string? WorkloadContext);
+    string? WorkloadContext,
+    // Erweiterung 2026-08-30 "Mail Monitor": noetig, damit ein persistenter Mail-Sink
+    // (CosmosMailSinkRepository) prozessuebergreifend nach Tenant filtern kann — ohne dieses
+    // Feld haette IEmailProvider.SendAsync keinen Tenant-Kontext zum Schreiben.
+    string PlatformTenantId);
 
 public interface IEmailProvider
 {
@@ -200,6 +204,33 @@ public interface IMockEntraUserRepository
     Task<IReadOnlyList<MockEntraUserRecord>> ListAsync(TenantContext tenant, CancellationToken ct);
 
     Task UpsertAsync(MockEntraUserRecord user, CancellationToken ct);
+}
+
+/// <summary>
+/// Persistenz fuer die Erinnerungs-Policy fuer offene Einladungen (Erweiterung 2026-08-30
+/// "Invitation Reminder Worker"). Genau eine Policy pro PlatformTenantId — GetAsync liefert
+/// null, solange der Tenant noch keine eigene Policy konfiguriert hat (Worker/Scanner
+/// behandeln das als "keine Reminder aktiv", siehe InvitationReminderWorker).
+/// </summary>
+public interface IReminderPolicyRepository
+{
+    Task<ReminderPolicy?> GetAsync(TenantContext tenant, CancellationToken ct);
+
+    Task UpsertAsync(ReminderPolicy policy, CancellationToken ct);
+}
+
+/// <summary>
+/// Persistenter Log der ueber IEmailProvider versendeten (Mock-)Mails (Mail Monitor,
+/// Erweiterung 2026-08-30). Noetig, weil API und Worker getrennte Prozesse mit jeweils
+/// eigenem In-Memory-Zustand sind — ein rein prozesslokaler Sink im API-Prozess wuerde nie die
+/// tatsaechlich vom Worker-Prozess versendeten Mails zeigen (derselbe Grund, aus dem
+/// MockEntraUser/Job-Status bereits frueher von InMemory auf Cosmos migriert wurden).
+/// </summary>
+public interface IMailSinkRepository
+{
+    Task AppendAsync(TenantContext tenant, EmailMessage message, DateTimeOffset sentAt, CancellationToken ct);
+
+    Task<IReadOnlyList<(EmailMessage Message, DateTimeOffset SentAt)>> ListAsync(TenantContext tenant, int take, CancellationToken ct);
 }
 
 /// <summary>Ein Sheet als Zeilen von Rohwerten, gelesen ab der Kopfzeile — die technische

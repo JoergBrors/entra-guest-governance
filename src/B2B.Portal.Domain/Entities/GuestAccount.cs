@@ -29,6 +29,26 @@ public sealed class GuestAccount
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     /// <summary>
+    /// Mock-Einladungs-Redemption-Link (Erweiterung 2026-08-30 "Invitation Reminder Worker").
+    /// Wird deterministisch beim Einladen gesetzt (siehe InvitationHandler.HandleAsync).
+    /// ACHTUNG: das ist KEIN echter Entra-Redemption-Link — ein echter DEV_INTEGRATION-Pfad
+    /// wuerde stattdessen die von Microsoft Graph beim Invite zurueckgegebene
+    /// "inviteRedeemUrl" verwenden (Integration pending, siehe
+    /// docs/architecture/graph-integration.md). Nur fuer LOCAL_MOCK/UI-Anzeige gedacht.
+    /// </summary>
+    public string? InvitationRedemptionLink { get; set; }
+
+    /// <summary>
+    /// Zuletzt erfolgreich gesendete Reminder-Stufe (1-basiert, siehe ReminderPolicy/
+    /// ReminderStage.StageNumber) — null, solange noch keine Reminder-Mail gesendet wurde.
+    /// Grundlage fuer die Idempotenz des periodischen Scanners (InvitationReminderWorker):
+    /// eine Stufe wird nie zweimal fuer denselben Gast ausgeloest.
+    /// </summary>
+    public int? LastReminderStageSent { get; set; }
+
+    public DateTimeOffset? LastReminderSentAt { get; set; }
+
+    /// <summary>
     /// Zustandsübergang. Absichtlich restriktiv: Disabled/Deleted dürfen laut
     /// Sicherheitsinvariante nur vom LifecycleService (Governance Core) über das
     /// Deletion Gate gesetzt werden, niemals direkt von einem Workload/Connector.

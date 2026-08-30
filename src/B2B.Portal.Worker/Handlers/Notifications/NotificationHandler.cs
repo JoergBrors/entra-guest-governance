@@ -38,7 +38,8 @@ public sealed class NotificationHandler(
             TemplateId: templateId,
             TemplateData: templateData,
             CorrelationId: job.CorrelationId,
-            WorkloadContext: workloadContext);
+            WorkloadContext: workloadContext,
+            PlatformTenantId: job.PlatformTenantId);
 
         await emailProvider.SendAsync(message, ct);
 

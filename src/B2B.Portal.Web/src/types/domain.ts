@@ -19,6 +19,20 @@ export interface GuestAccount {
   accountState: GuestAccountState;
   createdAt: string;
   updatedAt: string;
+  // Erweiterung 2026-08-30 "Invitation Reminder Worker": Mock-Redemption-Link (KEIN echter
+  // Entra-Link, siehe GuestAccount.cs) sowie Reminder-Tracking.
+  invitationRedemptionLink?: string | null;
+  lastReminderStageSent?: number | null;
+  lastReminderSentAt?: string | null;
+}
+
+/** Abgeleitet aus GuestAccountState (Invited = pending, alles andere = accepted) — siehe
+ * FilterGuestsAsync im Backend, dieselbe Ableitung wird hier fuers Guest-Pool-Filter-UI
+ * gespiegelt. */
+export type InvitationStatus = 'accepted' | 'pending';
+
+export function invitationStatusOf(state: GuestAccountState): InvitationStatus {
+  return state === 'Invited' ? 'pending' : 'accepted';
 }
 
 export interface WorkloadRole {
@@ -320,4 +334,39 @@ export interface ScenarioUser {
   active: boolean;
   lastLoginAt?: string | null;
   applicationLastLoginAt?: string | null;
+}
+
+// ---- Reminder Policy / Mail Monitor (Erweiterung 2026-08-30) ---------------
+
+export interface ReminderStage {
+  stageNumber: number;
+  daysAfterInvite: number;
+  templateId: string;
+  templateSubject: string;
+  templateBody: string;
+}
+
+export interface ReminderPolicy {
+  platformTenantId: string;
+  stages: ReminderStage[];
+  updatedAt: string;
+}
+
+export interface MailSinkEntry {
+  senderMailbox: string;
+  recipientMail: string;
+  templateId: string;
+  correlationId: string;
+  workloadContext?: string | null;
+  templateData: Record<string, string>;
+  sentAt: string;
+}
+
+// Erweiterung 2026-08-30 (Teil 2 "Outlook-HTML-Templates"): Ergebnis von
+// POST /api/reminder-policy/preview — bereits vollstaendig mit Beispieldaten gerendertes HTML
+// (inkl. Outlook-Geruest, siehe OutlookHtmlEmailRenderer, Backend), fertig fuer eine
+// iframe-Vorschau ohne weitere Client-seitige Verarbeitung.
+export interface ReminderStagePreview {
+  renderedSubject: string;
+  renderedHtml: string;
 }

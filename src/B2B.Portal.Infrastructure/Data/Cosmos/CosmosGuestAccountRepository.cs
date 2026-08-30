@@ -125,6 +125,17 @@ internal sealed class GuestAccountDocument
     [JsonPropertyName("updatedAt")]
     public required DateTimeOffset UpdatedAt { get; init; }
 
+    // Erweiterung 2026-08-30 "Invitation Reminder Worker" — optional/nullable, damit
+    // bestehende Cosmos-Dokumente ohne diese Felder weiterhin fehlerfrei deserialisieren.
+    [JsonPropertyName("invitationRedemptionLink")]
+    public string? InvitationRedemptionLink { get; init; }
+
+    [JsonPropertyName("lastReminderStageSent")]
+    public int? LastReminderStageSent { get; init; }
+
+    [JsonPropertyName("lastReminderSentAt")]
+    public DateTimeOffset? LastReminderSentAt { get; init; }
+
     public static GuestAccountDocument FromEntity(GuestAccount g) => new()
     {
         Id = g.Id.ToString(),
@@ -139,6 +150,9 @@ internal sealed class GuestAccountDocument
         AccountState = g.AccountState,
         CreatedAt = g.CreatedAt,
         UpdatedAt = g.UpdatedAt,
+        InvitationRedemptionLink = g.InvitationRedemptionLink,
+        LastReminderStageSent = g.LastReminderStageSent,
+        LastReminderSentAt = g.LastReminderSentAt,
     };
 
     public GuestAccount ToEntity()
@@ -156,6 +170,9 @@ internal sealed class GuestAccountDocument
             UserType = string.IsNullOrWhiteSpace(UserType) ? "Guest" : UserType,
             CreatedAt = CreatedAt,
             UpdatedAt = UpdatedAt,
+            InvitationRedemptionLink = InvitationRedemptionLink,
+            LastReminderStageSent = LastReminderStageSent,
+            LastReminderSentAt = LastReminderSentAt,
         };
 
         // AccountState hat einen private setter (GuestAccount.TransitionTo erzwingt die

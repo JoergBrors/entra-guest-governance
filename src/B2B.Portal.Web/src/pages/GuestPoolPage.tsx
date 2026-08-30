@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  Title2, Text, Table, TableHeader, TableRow, TableHeaderCell, TableBody, TableCell,
-  Badge, Input, Button, Field, Spinner, makeStyles, MessageBar, MessageBarBody,
+  Title2, Text, Badge, Input, Button, Field, Select, Spinner, makeStyles, MessageBar, MessageBarBody,
 } from '@fluentui/react-components';
 import { api } from '../api/client';
-import type { GuestAccount, DeletionGateEvaluation, GuestWorkloadAssignment, Workload } from '../types/domain';
+import { InvitationGuestList } from '../components/InvitationGuestList';
+import type {
+  GuestAccount, GuestAccountState, DeletionGateEvaluation, GuestWorkloadAssignment, Workload, WorkloadScenario,
+} from '../types/domain';
 
 const useStyles = makeStyles({
   form: {
@@ -14,20 +16,19 @@ const useStyles = makeStyles({
     alignItems: 'flex-end',
     margin: '16px 0 24px',
   },
+  filterBar: {
+    display: 'flex',
+    gap: '12px',
+    alignItems: 'flex-end',
+    margin: '0 0 16px',
+    flexWrap: 'wrap',
+  },
   assignmentRow: { display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center', marginBottom: '4px' },
 });
 
-const stateColor: Record<string, 'success' | 'warning' | 'danger' | 'informative'> = {
-  Active: 'success',
-  Invited: 'informative',
-  Discovered: 'informative',
-  OrphanCandidate: 'warning',
-  PendingRemoval: 'warning',
-  Blocked: 'danger',
-  Disabled: 'danger',
-  Deleted: 'danger',
-  Inactive: 'warning',
-};
+const ACCOUNT_STATES: GuestAccountState[] = [
+  'Discovered', 'Invited', 'Active', 'Inactive', 'Blocked', 'OrphanCandidate', 'PendingRemoval', 'Disabled', 'Deleted',
+];
 
 const assignmentStatusColor: Record<string, 'success' | 'warning' | 'danger' | 'informative'> = {
   Active: 'success',
@@ -53,6 +54,7 @@ export function GuestPoolPage() {
   const styles = useStyles();
   const [guests, setGuests] = useState<GuestAccount[] | null>(null);
   const [workloads, setWorkloads] = useState<Workload[]>([]);
+  const [scenarios, setScenarios] = useState<WorkloadScenario[]>([]);
   const [assignments, setAssignments] = useState<Record<string, GuestWorkloadAssignment[]>>({});
   const [mail, setMail] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -60,8 +62,22 @@ export function GuestPoolPage() {
   const [error, setError] = useState<string | null>(null);
   const [gateResult, setGateResult] = useState<Record<string, DeletionGateEvaluation>>({});
 
+  // Erweiterung 2026-08-30 "Guest Pool Filter": Workload/Szenario/Status/Einladungsstatus.
+  // Szenario-Auswahl ist auf den gewaehlten Workload beschraenkt (siehe onChange workloadFilter
+  // unten) — ein Szenario ohne Workload ergibt keinen Sinn (Szenario haengt fachlich an genau
+  // einem Workload, siehe WorkloadScenario.WorkloadId).
+  const [workloadFilter, setWorkloadFilter] = useState('');
+  const [scenarioFilter, setScenarioFilter] = useState('');
+  const [stateFilter, setStateFilter] = useState('');
+  const [invitationFilter, setInvitationFilter] = useState('');
+
   const reload = () => {
-    api.listGuests().then((gs) => {
+    api.listGuests({
+      workloadId: workloadFilter || undefined,
+      scenarioId: scenarioFilter || undefined,
+      accountState: (stateFilter || undefined) as GuestAccountState | undefined,
+      invitationStatus: (invitationFilter || undefined) as 'accepted' | 'pending' | undefined,
+    }).then((gs) => {
       setGuests(gs);
       gs.forEach((g) => {
         api.listGuestAssignments(g.id)
@@ -74,7 +90,17 @@ export function GuestPoolPage() {
 
   useEffect(() => {
     reload();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workloadFilter, scenarioFilter, stateFilter, invitationFilter]);
+
+  useEffect(() => {
+    if (!workloadFilter) {
+      setScenarios([]);
+      setScenarioFilter('');
+      return;
+    }
+    api.listScenarios(workloadFilter).then(setScenarios).catch(() => setScenarios([]));
+  }, [workloadFilter]);
 
   const workloadName = (workloadId: string) => workloads.find((w) => w.id === workloadId)?.name ?? workloadId;
   const roleName = (workloadId: string, roleId: string) =>
@@ -139,65 +165,84 @@ export function GuestPoolPage() {
         </Button>
       </div>
 
+      <div className={styles.filterBar}>
+        <Field label="Workload">
+          <Select value={workloadFilter} onChange={(_, d) => setWorkloadFilter(d.value)}>
+            <option value="">Alle Workloads</option>
+            {workloads.map((w) => (
+              <option key={w.id} value={w.id}>{w.name}</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Szenario">
+          <Select value={scenarioFilter} onChange={(_, d) => setScenarioFilter(d.value)} disabled={!workloadFilter}>
+            <option value="">Alle Szenarien</option>
+            {scenarios.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Status">
+          <Select value={stateFilter} onChange={(_, d) => setStateFilter(d.value)}>
+            <option value="">Alle Status</option>
+            {ACCOUNT_STATES.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Einladung">
+          <Select value={invitationFilter} onChange={(_, d) => setInvitationFilter(d.value)}>
+            <option value="">Alle</option>
+            <option value="pending">Ausstehend</option>
+            <option value="accepted">Angenommen</option>
+          </Select>
+        </Field>
+      </div>
+
       {!guests ? (
         <Spinner label="Lade Gäste…" />
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHeaderCell>Anzeigename</TableHeaderCell>
-              <TableHeaderCell>E-Mail</TableHeaderCell>
-              <TableHeaderCell>UserType</TableHeaderCell>
-              <TableHeaderCell>Status</TableHeaderCell>
-              <TableHeaderCell>Workloads</TableHeaderCell>
-              <TableHeaderCell>Deletion Gate (Dry Run)</TableHeaderCell>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {guests.map((g) => (
-              <TableRow key={g.id}>
-                <TableCell><Link to={`/guest-pool/${g.id}`}>{g.displayName}</Link></TableCell>
-                <TableCell>{g.mail}</TableCell>
-                <TableCell><Badge>{g.userType}</Badge></TableCell>
-                <TableCell>
-                  <Badge color={stateColor[g.accountState] ?? 'informative'}>{g.accountState}</Badge>
-                </TableCell>
-                <TableCell>
-                  {(assignments[g.id] ?? []).length === 0 && <Text size={200}>Keine Workloads</Text>}
-                  {(assignments[g.id] ?? []).map((a) => (
-                    <div key={a.id} className={styles.assignmentRow}>
-                      <Badge color={assignmentStatusColor[a.status] ?? 'informative'}>
-                        {workloadName(a.workloadId)} · {roleName(a.workloadId, a.roleId)} ({a.status})
-                      </Badge>
-                      {activeAssignmentStatuses.has(a.status) && (
-                        <Button size="small" appearance="transparent" onClick={() => handleUnassign(g.id, a.id)}>
-                          Unassign
-                        </Button>
-                      )}
-                    </div>
-                  ))}
-                </TableCell>
-                <TableCell>
-                  <Button size="small" onClick={() => handleValidateDeletion(g.id)}>
-                    Prüfen
-                  </Button>
-                  {gateResult[g.id] && (
-                    <div style={{ marginTop: 4 }}>
-                      <Badge color={gateResult[g.id].result === 'Ready' ? 'success' : 'danger'}>
-                        {gateResult[g.id].result}
-                      </Badge>
-                      {gateResult[g.id].blockers.length > 0 && (
-                        <Text size={200} block>
-                          Blocker: {gateResult[g.id].blockers.join(', ')}
-                        </Text>
-                      )}
-                    </div>
+        <InvitationGuestList
+          guests={guests}
+          onGuestUpdated={reload}
+          nameLink={(g) => <Link to={`/guest-pool/${g.id}`}>{g.displayName}</Link>}
+          extraHeaderCells={['UserType', 'Workloads', 'Deletion Gate (Dry Run)']}
+          renderExtraCells={(g) => [
+            <Badge key="userType">{g.userType}</Badge>,
+            <div key="workloads">
+              {(assignments[g.id] ?? []).length === 0 && <Text size={200}>Keine Workloads</Text>}
+              {(assignments[g.id] ?? []).map((a) => (
+                <div key={a.id} className={styles.assignmentRow}>
+                  <Badge color={assignmentStatusColor[a.status] ?? 'informative'}>
+                    {workloadName(a.workloadId)} · {roleName(a.workloadId, a.roleId)} ({a.status})
+                  </Badge>
+                  {activeAssignmentStatuses.has(a.status) && (
+                    <Button size="small" appearance="transparent" onClick={() => handleUnassign(g.id, a.id)}>
+                      Unassign
+                    </Button>
                   )}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+                </div>
+              ))}
+            </div>,
+            <div key="deletionGate">
+              <Button size="small" onClick={() => handleValidateDeletion(g.id)}>
+                Prüfen
+              </Button>
+              {gateResult[g.id] && (
+                <div style={{ marginTop: 4 }}>
+                  <Badge color={gateResult[g.id].result === 'Ready' ? 'success' : 'danger'}>
+                    {gateResult[g.id].result}
+                  </Badge>
+                  {gateResult[g.id].blockers.length > 0 && (
+                    <Text size={200} block>
+                      Blocker: {gateResult[g.id].blockers.join(', ')}
+                    </Text>
+                  )}
+                </div>
+              )}
+            </div>,
+          ]}
+        />
       )}
     </div>
   );

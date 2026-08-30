@@ -41,6 +41,11 @@ builder.Services.AddSingleton<WorkloadManagementService>();
 // Handlergruppen registrieren (MVP-Dokument Abschnitt 5).
 builder.Services.AddSingleton<IJobHandler, InvitationHandler>();
 builder.Services.AddSingleton<IJobHandler, ResendInvitationHandler>();
+builder.Services.AddSingleton<IJobHandler>(sp => new InvitationReminderHandler(
+    sp.GetRequiredService<B2B.Portal.Application.Ports.IEmailProvider>(),
+    sp.GetRequiredService<B2B.Portal.Application.Ports.IGuestAccountRepository>(),
+    senderMailboxConfig: builder.Configuration["NOTIFICATIONS_SHARED_MAILBOX"] ?? "b2b-notifications@local.mock",
+    sp.GetRequiredService<ILogger<InvitationReminderHandler>>()));
 builder.Services.AddSingleton<IJobHandler, GrantWorkloadRoleHandler>();
 builder.Services.AddSingleton<IJobHandler, RevokeWorkloadRoleHandler>();
 builder.Services.AddSingleton<IJobHandler, DeployScenarioHandler>();
@@ -67,6 +72,7 @@ builder.Services.AddHostedService<PollingWorker>();
 if (mode == "LOCAL_MOCK")
 {
     builder.Services.AddHostedService<ApplicationSignInSyncWorker>();
+    builder.Services.AddHostedService<InvitationReminderWorker>();
 }
 
 var host = builder.Build();

@@ -1,6 +1,6 @@
 # Local Mock
 
-Stand: 2026-08-30 (aktualisiert: Identity Provider + JWT-Login; Mock-Entra-User-Persistenz + Startup-Hydration; Worker/Trigger-Uebersicht + Job-Restart)
+Stand: 2026-08-30 (aktualisiert: Identity Provider + JWT-Login; Mock-Entra-User-Persistenz + Startup-Hydration; Worker/Trigger-Uebersicht + Job-Restart; Invitation Reminder Worker + Erinnerungs-Policy + Mail Monitor)
 
 `LOCAL_MOCK` bleibt der Default fuer lokale Entwicklung.
 
@@ -56,6 +56,47 @@ bleibt als Historie erhalten. Voraussetzung: der Job wurde nach Einfuehrung von
 nicht neu gestartet werden, 400 mit entsprechender Fehlermeldung).
 
 Produktive Werte: `configuration required`.
+
+## Invitation Reminder Worker, Erinnerungs-Policy, Mail Monitor (Erweiterung 2026-08-30)
+
+Neuer periodischer `BackgroundService` `InvitationReminderWorker` (Worker-Host, nur unter
+`LOCAL_MOCK` registriert, gleiches 10-Minuten-Intervall wie `ApplicationSignInSyncWorker`):
+scannt Gaeste im Zustand `Invited`, deren Einladung (`GuestAccount.CreatedAt`) laenger
+zurueckliegt als die naechste faellige Stufe der tenant-weiten `ReminderPolicy`
+(`GET/PUT /api/reminder-policy`, Governance-Admin-only, Admin-UI unter `/reminder-policy`).
+Ohne konfigurierte Policy (keine Stufen) passiert nichts — es gibt keine hartkodierten
+Default-Stufen. Idempotenz ueber `GuestAccount.LastReminderStageSent`/`LastReminderSentAt`:
+eine Stufe wird pro Gast genau einmal ausgeloest, nie uebersprungen, nie doppelt gesendet.
+
+Der eigentliche Versand laeuft ueber einen neuen `IJobHandler` fuer
+`JobTypes.InvitationReminder` (`InvitationReminderHandler`, in derselben Datei wie
+`InvitationHandler`/`ResendInvitationHandler`) — einfache String-Platzhalter-Ersetzung in
+Betreff/Text (`{{DisplayName}}`, `{{WorkloadName}}`, `{{DaysSinceInvite}}`,
+`{{RedemptionLink}}`), kein Templating-Framework.
+
+**Mock-Redemption-Link:** `GuestAccount.InvitationRedemptionLink` wird deterministisch beim
+Einladen gesetzt (`InvitationHandler.HandleAsync`, Format
+`https://mock-invite.local/redeem/{guestId}`). Das ist **kein echter Entra-Redemption-Link** —
+ein echter `DEV_INTEGRATION`-Pfad wuerde stattdessen die von Microsoft Graph beim Invite
+zurueckgegebene `inviteRedeemUrl` verwenden (`integration pending`, siehe
+`docs/architecture/graph-integration.md`).
+
+**Guest Pool Filter:** `GET /api/guest-accounts` akzeptiert jetzt optionale Query-Parameter
+`workloadId`, `scenarioId`, `accountState`, `invitationStatus` (`accepted`/`pending`,
+abgeleitet aus `GuestAccountState` — `Invited` = pending, alles andere = accepted). Filterung
+laeuft serverseitig ueber `GuestWorkloadAssignment`/`WorkloadScenario`.
+
+**Scoped Visibility fuer Workload-/Scenario-Owner:** neuer Endpoint
+`GET /api/me/managed-guests` (dieselbe Scoping-Logik wie `GET /api/me/workloads` — kein
+Governance-Admin noetig, nur `CanManageWorkload`/`ScenarioManagerWorkloadIds`) liefert
+dieselbe gefilterte Gaesteliste, beschraenkt auf die selbst verwalteten Workloads. Erscheint
+als eigener Abschnitt ueber "Meine Workloads" auf `MyWorkloadsPage.tsx`, nur fuer
+WorkloadOwner/ScenarioManager/GovernanceAdmin sichtbar.
+
+**Mail Monitor:** `MockEmailProvider.Sink` (bisher nirgends erreichbar) ist jetzt ueber
+`GET /api/dev/mail-sink` abrufbar (LOCAL_MOCK-only, Governance-Admin-only, wie alle
+`/api/dev/*`-Endpunkte) und in der neuen Admin-Seite `/mail-monitor` sichtbar (Polling wie
+`JobsPage`, neueste zuerst).
 
 ## Mock Entra Directory
 

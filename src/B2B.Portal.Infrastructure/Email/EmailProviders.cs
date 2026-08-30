@@ -1,21 +1,27 @@
 using B2B.Portal.Application.Ports;
+using B2B.Portal.Domain.ValueObjects;
 using Microsoft.Extensions.Logging;
 
 namespace B2B.Portal.Infrastructure.Email;
 
 /// <summary>
 /// Rendert eine strukturierte E-Mail-Vorschau in Log/Test-Sink statt zu versenden
-/// (MVP-Dokument Abschnitt 6: "LOCAL_MOCK rendert eine E-Mail-Vorschau"). Der Sink
-/// wird zusätzlich in-memory gehalten, damit Tests und die Admin-UI die letzten
-/// Vorschauen inspizieren können (Sender, Recipient, Template, CorrelationId,
-/// Workload-Kontext — siehe MVP-Verification-Prompt, Punkt 10).
+/// (MVP-Dokument Abschnitt 6: "LOCAL_MOCK rendert eine E-Mail-Vorschau"). Der In-Memory-Sink
+/// bleibt fuer schnelle Tests bestehen (MockEmailProviderTests), ist aber NICHT die Quelle des
+/// Mail Monitors (GET /api/dev/mail-sink, Erweiterung 2026-08-30): API und Worker sind
+/// getrennte Prozesse mit getrenntem In-Memory-Zustand — ein rein prozesslokaler Sink im
+/// Worker (wo die meisten Mails tatsaechlich versendet werden, z.B. InvitationReminder) waere
+/// fuer den im API-Prozess laufenden Monitor-Endpoint nie sichtbar (Bug, live beobachtet: Mail
+/// im Worker-Log sichtbar versendet, aber GET /api/dev/mail-sink zeigte []). Daher zusaetzlich
+/// Persistenz ueber IMailSinkRepository (Cosmos, discovery-Container) — derselbe Grund, aus
+/// dem Job-Status/Mock-Entra-User bereits frueher von InMemory auf Cosmos migriert wurden.
 /// </summary>
-public sealed class MockEmailProvider(ILogger<MockEmailProvider> logger) : IEmailProvider
+public sealed class MockEmailProvider(ILogger<MockEmailProvider> logger, IMailSinkRepository mailSinkRepository) : IEmailProvider
 {
     private readonly List<EmailMessage> _sink = [];
     public IReadOnlyList<EmailMessage> Sink => _sink;
 
-    public Task SendAsync(EmailMessage message, CancellationToken ct)
+    public async Task SendAsync(EmailMessage message, CancellationToken ct)
     {
         _sink.Add(message);
         logger.LogInformation(
@@ -23,7 +29,9 @@ public sealed class MockEmailProvider(ILogger<MockEmailProvider> logger) : IEmai
             "CorrelationId={CorrelationId} WorkloadContext={WorkloadContext} Data={@TemplateData}",
             message.SenderMailbox, message.RecipientMail, message.TemplateId,
             message.CorrelationId, message.WorkloadContext, message.TemplateData);
-        return Task.CompletedTask;
+
+        var tenant = TenantContext.Create(message.PlatformTenantId);
+        await mailSinkRepository.AppendAsync(tenant, message, DateTimeOffset.UtcNow, ct);
     }
 }
 

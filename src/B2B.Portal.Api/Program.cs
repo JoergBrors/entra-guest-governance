@@ -15,6 +15,7 @@ using B2B.Portal.Domain.Services;
 using B2B.Portal.Infrastructure;
 using B2B.Portal.Infrastructure.Auth;
 using B2B.Portal.Infrastructure.Directory;
+using B2B.Portal.Infrastructure.Email;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
@@ -401,8 +402,16 @@ app.MapGet("/api/ui/configuration", (HttpContext ctx, IPortalUserContextAccessor
 }).AllowAnonymous();
 
 // ---- Queries (Blueprint 16.1) --------------------------------------------
+// Erweiterung 2026-08-30 "Guest Pool Filter/Invitation Reminder": optionale Query-Parameter
+// workloadId/scenarioId/accountState/invitationStatus. Die Workload-/Szenario-Filterung laeuft
+// serverseitig ueber GuestWorkloadAssignment/WorkloadScenario (Join), statt den kompletten
+// Gast-/Assignment-Bestand an den Client zu schicken und dort clientseitig zu filtern (siehe
+// Aufgabenstellung "fuer Korrektheit/Effizienz bei Skalierung").
 app.MapGet("/api/guest-accounts", async (
-    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IGuestAccountRepository repo, CancellationToken ct) =>
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IGuestAccountRepository repo,
+    IAssignmentRepository assignmentRepo, IWorkloadScenarioRepository scenarioRepo,
+    Guid? workloadId, Guid? scenarioId, GuestAccountState? accountState, string? invitationStatus,
+    CancellationToken ct) =>
 {
     if (!userCtx.Current.IsGovernanceAdmin)
     {
@@ -410,7 +419,9 @@ app.MapGet("/api/guest-accounts", async (
     }
 
     var guests = await repo.ListAsync(tenantCtx.Current, ct);
-    return Results.Ok(guests);
+    var filtered = await FilterGuestsAsync(
+        tenantCtx.Current, guests, workloadId, scenarioId, accountState, invitationStatus, assignmentRepo, scenarioRepo, ct);
+    return Results.Ok(filtered);
 });
 
 app.MapGet("/api/guest-accounts/{id:guid}", async (
@@ -455,6 +466,48 @@ app.MapGet("/api/me/workloads", async (
     return Results.Ok(result);
 });
 
+// Erweiterung 2026-08-30 "Scoped Visibility fuer Workload-/Scenario-Owner": mirrort exakt die
+// Scoping-Logik von GET /api/workloads (CanManageWorkload ODER ScenarioManagerWorkloadIds),
+// NICHT GovernanceAdmin-only wie der volle Guest Pool (/api/guest-accounts). Liefert dieselbe
+// gefilterte Gaesteliste wie der Guest Pool, aber serverseitig auf die Workloads beschraenkt,
+// die der eingeloggte User selbst verwaltet — Grundlage fuer den neuen Abschnitt auf
+// MyWorkloadsPage.tsx.
+app.MapGet("/api/me/managed-guests", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, IGuestAccountRepository guestRepo, IAssignmentRepository assignmentRepo,
+    CancellationToken ct) =>
+{
+    var user = userCtx.Current;
+    if (!user.IsGovernanceAdmin && !user.HasRole(PortalRoles.WorkloadOwner) && !user.HasRole(PortalRoles.ScenarioManager))
+    {
+        return Results.Ok(Array.Empty<GuestAccount>());
+    }
+
+    var workloads = await workloadRepo.ListAsync(tenantCtx.Current, ct);
+    var managedWorkloadIds = workloads
+        .Where(w => user.CanManageWorkload(w.Owner) || user.ScenarioManagerWorkloadIds.Contains(w.Id))
+        .Select(w => w.Id)
+        .ToHashSet();
+    if (managedWorkloadIds.Count == 0)
+    {
+        return Results.Ok(Array.Empty<GuestAccount>());
+    }
+
+    var guestIds = new HashSet<Guid>();
+    foreach (var workloadId in managedWorkloadIds)
+    {
+        var assignments = await assignmentRepo.ListByWorkloadAsync(tenantCtx.Current, workloadId, ct);
+        foreach (var assignment in assignments)
+        {
+            guestIds.Add(assignment.GuestId);
+        }
+    }
+
+    var allGuests = await guestRepo.ListAsync(tenantCtx.Current, ct);
+    var scoped = allGuests.Where(g => guestIds.Contains(g.Id)).ToList();
+    return Results.Ok(scoped);
+});
+
 app.MapGet("/api/me/navigation", (IPortalUserContextAccessor userCtx) =>
 {
     var user = userCtx.Current;
@@ -465,7 +518,7 @@ app.MapGet("/api/me/navigation", (IPortalUserContextAccessor userCtx) =>
     }
     if (user.IsGovernanceAdmin)
     {
-        items.AddRange(["Übersicht", "Guest Pool", "Workloads", "Einladungen", "Reviews", "Zugriffsanträge", "Compliance", "Audit", "Ressourcen / Discovery", "Jobs", "Templates", "Konfiguration"]);
+        items.AddRange(["Übersicht", "Guest Pool", "Workloads", "Einladungen", "Reviews", "Zugriffsanträge", "Compliance", "Audit", "Ressourcen / Discovery", "Jobs", "Erinnerungs-Policy", "Mail Monitor", "Templates", "Konfiguration"]);
     }
     else if (user.HasRole(PortalRoles.WorkloadOwner) || user.HasRole(PortalRoles.ScenarioManager))
     {
@@ -848,6 +901,86 @@ app.MapGet("/api/audit-events", async (
     return Results.Ok(events);
 });
 
+// ---- Reminder Policy (Erweiterung 2026-08-30 "Invitation Reminder Worker") -----------------
+// GovernanceAdmin-only Konfiguration der mehrstufigen Erinnerungs-Policy fuer offene
+// Einladungen — der periodische InvitationReminderWorker liest ausschliesslich diese Policy,
+// es gibt keine hartkodierten Default-Stufen.
+app.MapGet("/api/reminder-policy", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IReminderPolicyRepository repo, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var policy = await repo.GetAsync(tenantCtx.Current, ct);
+    return Results.Ok(policy ?? new ReminderPolicy { PlatformTenantId = tenantCtx.Current.PlatformTenantId });
+});
+
+app.MapPut("/api/reminder-policy", async (
+    UpdateReminderPolicyBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IReminderPolicyRepository repo, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var policy = new ReminderPolicy
+    {
+        PlatformTenantId = tenantCtx.Current.PlatformTenantId,
+        Stages =
+        [
+            .. body.Stages
+                .OrderBy(s => s.StageNumber)
+                .Select(s => new ReminderStage
+                {
+                    StageNumber = s.StageNumber,
+                    DaysAfterInvite = s.DaysAfterInvite,
+                    TemplateId = s.TemplateId,
+                    TemplateSubject = s.TemplateSubject,
+                    TemplateBody = s.TemplateBody,
+                }),
+        ],
+        UpdatedAt = DateTimeOffset.UtcNow,
+    };
+    await repo.UpsertAsync(policy, ct);
+    return Results.Ok(policy);
+});
+
+// Erweiterung 2026-08-30 (Teil 2 "Outlook-HTML-Templates"): rendert Betreff/Body EXAKT wie der
+// InvitationReminderHandler es beim echten Versand tut (derselbe OutlookHtmlEmailRenderer,
+// dieselbe Platzhalter-Ersetzung mit Beispieldaten statt echtem Gast) — GovernanceAdmin kann
+// so die Outlook-Kompatibilitaet pruefen, bevor eine Stufe gespeichert wird. Kein Versand,
+// keine Job-Erzeugung, rein lesend.
+app.MapPost("/api/reminder-policy/preview", (
+    ReminderStagePreviewBody body, IPortalUserContextAccessor userCtx) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    const string sampleDisplayName = "Anna Musterfrau";
+    const string sampleWorkloadName = "SAP S/4 Rollout";
+    const int sampleDaysSinceInvite = 7;
+    const string sampleRedemptionLink = "https://mock-invite.local/redeem/00000000-0000-0000-0000-000000000000";
+
+    string Render(string template, bool htmlEncode)
+    {
+        string Encode(string value) => htmlEncode ? System.Net.WebUtility.HtmlEncode(value) : value;
+        return template
+            .Replace("{{DisplayName}}", Encode(sampleDisplayName))
+            .Replace("{{WorkloadName}}", Encode(sampleWorkloadName))
+            .Replace("{{DaysSinceInvite}}", sampleDaysSinceInvite.ToString())
+            .Replace("{{RedemptionLink}}", sampleRedemptionLink);
+    }
+
+    var subject = Render(body.TemplateSubject, htmlEncode: false);
+    var renderedHtml = OutlookHtmlEmailRenderer.Render(subject, Render(body.TemplateBody, htmlEncode: true));
+    return Results.Ok(new ReminderStagePreviewResponse(subject, renderedHtml));
+});
+
 // ---- Commands (Blueprint 16.1) -------------------------------------------
 app.MapPost("/api/guests/invite", async (
     InviteGuestBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, InviteGuestCommandHandler handler,
@@ -864,6 +997,40 @@ app.MapPost("/api/guests/invite", async (
         body.Mail, body.DisplayName, Actor: userCtx.Current.Mail);
     var guest = await handler.HandleAsync(request, ct);
     return Results.Ok(guest);
+});
+
+// Erweiterung 2026-08-30 (Teil 3 "Manuelles Resend"): ResendInvitationHandler existierte
+// bereits (Handlers/Invitation/InvitationHandler.cs), hatte aber nirgends einen Trigger — nur
+// der automatische InvitationReminderWorker konnte bislang eine Erinnerung ausloesen. Admin
+// kann jetzt gezielt "jetzt nochmal einladen" fuer einen einzelnen Gast anstossen, unabhaengig
+// von der konfigurierten Reminder-Policy/Tagesschwelle.
+app.MapPost("/api/guest-accounts/{id:guid}/resend-invitation", async (
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IGuestAccountRepository guestRepo, ProvisioningService provisioningService, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var guest = await guestRepo.GetAsync(tenantCtx.Current, id, ct);
+    if (guest is null)
+    {
+        return Results.NotFound(new { error = $"Gast {id} nicht gefunden." });
+    }
+    if (string.IsNullOrWhiteSpace(guest.EntraObjectId))
+    {
+        return Results.BadRequest(new { error = "Gast wurde noch nicht eingeladen (keine EntraObjectId) — kein Resend moeglich." });
+    }
+
+    var correlationId = Guid.NewGuid();
+    var hash = DesiredStateHasher.Hash("ResendInvitation", guest.Id.ToString(), correlationId.ToString());
+    var job = await provisioningService.EnqueueJobAsync(
+        tenantCtx.Current.PlatformTenantId, tenantCtx.Current.DirectoryTenantId, JobTypes.ResendInvitation,
+        nameof(GuestAccount), guest.Id.ToString(), hash,
+        new { EntraObjectId = guest.EntraObjectId }, correlationId, ct, triggeredBy: userCtx.Current.Mail);
+
+    return Results.Ok(new { jobId = job.Id });
 });
 
 app.MapPost("/api/workloads/{workloadId:guid}/assignments", async (
@@ -1438,6 +1605,28 @@ if (mode == "LOCAL_MOCK")
         return Results.Ok(store.ListApplicationSignIns(appId));
     });
 
+    // Erweiterung 2026-08-30 "Mail Monitor": liest aus IMailSinkRepository (Cosmos), NICHT aus
+    // MockEmailProvider.Sink — der In-Memory-Sink ist prozesslokal, die meisten Mails
+    // (InvitationReminder) werden aber im separaten Worker-Prozess versendet und waeren im
+    // API-Prozess-Sink nie sichtbar (live beobachtet: Worker-Log zeigte erfolgreichen Versand,
+    // dieser Endpoint lieferte trotzdem [] — siehe MockEmailProvider-Klassenkommentar).
+    // GovernanceAdmin-only, LOCAL_MOCK-only wie alle uebrigen /api/dev/*-Endpunkte.
+    app.MapGet("/api/dev/mail-sink", async (
+        ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IMailSinkRepository mailSinkRepository, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var entries = (await mailSinkRepository.ListAsync(tenantCtx.Current, take: 200, ct))
+            .Select(entry => new MailSinkEntryDto(
+                entry.Message.SenderMailbox, entry.Message.RecipientMail, entry.Message.TemplateId,
+                entry.Message.CorrelationId, entry.Message.WorkloadContext, entry.Message.TemplateData, entry.SentAt))
+            .ToList();
+        return Results.Ok(entries);
+    });
+
     app.MapPost("/api/dev/seed/large-workload", async (
         SeedLargeWorkloadBody? body, ITenantContextAccessor tenantCtx,
         IWorkloadRepository workloadRepo, IGuestAccountRepository guestRepo,
@@ -1696,6 +1885,64 @@ static Guid? ResolveJobWorkloadId(DirectoryOperation job)
         : null;
 }
 
+/// <summary>
+/// Serverseitige Filterung fuer GET /api/guest-accounts (Erweiterung 2026-08-30 "Guest Pool
+/// Filter"). workloadId/scenarioId werden ueber GuestWorkloadAssignment/WorkloadScenario
+/// aufgeloest (ein Szenario selbst haengt an keinem Assignment — Filterung erfolgt daher ueber
+/// die WorkloadRole-Zuordnung des Szenarios, analog zu /scenarios/{id}/users). invitationStatus
+/// ist "accepted" (jeder State ausser Invited) oder "pending" (State == Invited) — abgeleitet
+/// aus dem bestehenden GuestAccountState statt eines eigenen Feldes (siehe
+/// GuestAccount.TransitionTo).
+/// </summary>
+static async Task<IReadOnlyList<GuestAccount>> FilterGuestsAsync(
+    B2B.Portal.Domain.ValueObjects.TenantContext tenant,
+    IReadOnlyList<GuestAccount> guests,
+    Guid? workloadId,
+    Guid? scenarioId,
+    GuestAccountState? accountState,
+    string? invitationStatus,
+    IAssignmentRepository assignmentRepo,
+    IWorkloadScenarioRepository scenarioRepo,
+    CancellationToken ct)
+{
+    IEnumerable<GuestAccount> result = guests;
+
+    if (accountState is not null)
+    {
+        result = result.Where(g => g.AccountState == accountState);
+    }
+
+    if (!string.IsNullOrWhiteSpace(invitationStatus))
+    {
+        var pending = string.Equals(invitationStatus, "pending", StringComparison.OrdinalIgnoreCase);
+        result = pending
+            ? result.Where(g => g.AccountState == GuestAccountState.Invited)
+            : result.Where(g => g.AccountState != GuestAccountState.Invited);
+    }
+
+    if (scenarioId is not null)
+    {
+        // Szenario -> Workload -> betroffene Rollen (ResourceMappings ueberschneiden sich mit
+        // den ScenarioResourceRules) -> Gaeste mit einem Assignment auf einer dieser Rollen.
+        var scenario = await scenarioRepo.GetAsync(tenant, scenarioId.Value, ct);
+        if (scenario is null)
+        {
+            return [];
+        }
+        var scenarioAssignments = await assignmentRepo.ListByWorkloadAsync(tenant, scenario.WorkloadId, ct);
+        var scenarioGuestIds = scenarioAssignments.Select(a => a.GuestId).ToHashSet();
+        result = result.Where(g => scenarioGuestIds.Contains(g.Id));
+    }
+    else if (workloadId is not null)
+    {
+        var workloadAssignments = await assignmentRepo.ListByWorkloadAsync(tenant, workloadId.Value, ct);
+        var workloadGuestIds = workloadAssignments.Select(a => a.GuestId).ToHashSet();
+        result = result.Where(g => workloadGuestIds.Contains(g.Id));
+    }
+
+    return result.ToList();
+}
+
 static async Task<JobStatusResponse> ToJobStatusResponseAsync(
     B2B.Portal.Domain.ValueObjects.TenantContext tenant,
     DirectoryOperation job,
@@ -1912,6 +2159,30 @@ public sealed record UpsertWorkloadRoleBody(
     List<Guid> ResourceMappings);
 public sealed record UpsertWorkloadResourceBody(string ResourceType, string? ExternalId);
 public sealed record AttachWorkloadResourceBody(string ResourceType, string ExternalId);
+
+/// <summary>Body fuer PUT /api/reminder-policy (Erweiterung 2026-08-30 "Invitation Reminder
+/// Worker") — die komplette geordnete Stufenliste wird ersetzt (kein partielles Patchen
+/// einzelner Stufen, analog zu ResourceNamePatterns bei UpdateWorkloadBody).</summary>
+public sealed record ReminderStageBody(
+    int StageNumber, int DaysAfterInvite, string TemplateId, string TemplateSubject, string TemplateBody);
+public sealed record UpdateReminderPolicyBody(List<ReminderStageBody> Stages);
+
+/// <summary>Body/Antwort fuer POST /api/reminder-policy/preview (Erweiterung 2026-08-30 (Teil 2)
+/// "Outlook-HTML-Templates") — TemplateBody wird mit Beispieldaten gerendert und in dasselbe
+/// Outlook-Geruest gewrappt wie beim echten Versand.</summary>
+public sealed record ReminderStagePreviewBody(string TemplateSubject, string TemplateBody);
+public sealed record ReminderStagePreviewResponse(string RenderedSubject, string RenderedHtml);
+
+/// <summary>Antwort-DTO fuer GET /api/dev/mail-sink (Erweiterung 2026-08-30 "Mail Monitor") —
+/// EmailMessage selbst bleibt unveraendert, SentAt kommt aus MockEmailProvider.SinkWithTimestamps.</summary>
+public sealed record MailSinkEntryDto(
+    string SenderMailbox,
+    string RecipientMail,
+    string TemplateId,
+    Guid CorrelationId,
+    string? WorkloadContext,
+    IReadOnlyDictionary<string, string> TemplateData,
+    DateTimeOffset SentAt);
 
 /// <summary>JSON-Form des GuestImportColumnMapping für den multipart-Formularfeld
 /// "mapping" — ColumnToField kommt als Dictionary&lt;string,string&gt; über JSON (Spalten-

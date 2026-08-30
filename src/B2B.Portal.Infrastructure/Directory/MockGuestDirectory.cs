@@ -116,6 +116,24 @@ public sealed class MockEntraDirectoryStore
         lock (_gate) return [.. _users.Values.OrderBy(u => u.Mail)];
     }
 
+    /// <summary>
+    /// Alle PlatformTenantIds, die im Mock-Stamm bekannt sind (Erweiterung 2026-08-30 (Teil 3)
+    /// "Multi-Tenant-Scanner"). Grundlage fuer periodische BackgroundServices
+    /// (InvitationReminderWorker, ApplicationSignInSyncWorker), die vorher nur einen einzigen,
+    /// aus der Frontend-Env-Variable VITE_DEV_PLATFORM_TENANT_ID gelesenen Tenant scannten —
+    /// bei mehreren Platform-Tenants blieben alle ausser dem ersten unbeachtet. Der Mock-Stamm
+    /// wird beim API-Start bereits vollstaendig aus Cosmos hydriert (siehe
+    /// HydrateFromRepositoryAsync), ist also eine verlaessliche Quelle "welche Tenants
+    /// existieren ueberhaupt", ohne dass die Repository-Ports selbst eine
+    /// Tenant-uebergreifende Query anbieten muessten (die sind bewusst alle TenantContext-
+    /// pflichtig, siehe CorePorts.cs — Tenant-Isolation by Design).
+    /// </summary>
+    public IReadOnlyList<string> ListKnownPlatformTenantIds()
+    {
+        lock (_gate)
+            return [.. _users.Values.Select(u => u.PlatformTenantId).Distinct(StringComparer.OrdinalIgnoreCase)];
+    }
+
     public IReadOnlyList<MockEntraGroup> ListGroups()
     {
         lock (_gate) return [.. _groups.Values.OrderBy(g => g.DisplayName)];

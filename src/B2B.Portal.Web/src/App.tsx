@@ -16,6 +16,8 @@ import { GuestDetailPage } from './pages/GuestDetailPage';
 import { AccessRequestPage } from './pages/AccessRequestPage';
 import { JobsPage } from './pages/JobsPage';
 import { WorkerOverviewPage } from './pages/WorkerOverviewPage';
+import { ReminderPolicyPage } from './pages/ReminderPolicyPage';
+import { MailMonitorPage } from './pages/MailMonitorPage';
 import { CompliancePage } from './pages/CompliancePage';
 import { DiscoveryPage } from './pages/DiscoveryPage';
 import { DevThemePreviewPage } from './pages/DevThemePreviewPage';
@@ -91,7 +93,18 @@ export function App() {
               )}
             >
               <Route index element={<DashboardPage />} />
-              <Route path="my-workloads" element={<MyWorkloadsPage />} />
+              <Route
+                path="my-workloads"
+                element={(
+                  <MyWorkloadsPage
+                    canManageWorkloads={
+                      claims.roles.includes('GovernanceAdmin')
+                      || claims.roles.includes('WorkloadOwner')
+                      || claims.roles.includes('ScenarioManager')
+                    }
+                  />
+                )}
+              />
               <Route path="access-request" element={<AccessRequestPage />} />
               <Route path="guest-pool" element={<GuestPoolPage />} />
               <Route path="guest-pool/:guestId" element={<GuestDetailPage />} />
@@ -105,6 +118,8 @@ export function App() {
               <Route path="discovery" element={<DiscoveryPage />} />
               <Route path="jobs" element={<JobsPage />} />
               <Route path="worker" element={<WorkerOverviewPage />} />
+              <Route path="reminder-policy" element={<ReminderPolicyPage />} />
+              <Route path="mail-monitor" element={<MailMonitorPage />} />
               {import.meta.env.DEV && <Route path="dev/theme-preview" element={<DevThemePreviewPage />} />}
               {import.meta.env.DEV && <Route path="dev/mock-entra" element={<MockEntraPage />} />}
               <Route path="login" element={<Navigate to="/" replace />} />

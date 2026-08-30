@@ -139,6 +139,12 @@ export function AppLayout({ productName, userMail, roles, platformTenantId, them
                 <NavLink to="/worker" className={styles.navLink}>
                   Worker
                 </NavLink>
+                <NavLink to="/reminder-policy" className={styles.navLink}>
+                  Erinnerungs-Policy
+                </NavLink>
+                <NavLink to="/mail-monitor" className={styles.navLink}>
+                  Mail Monitor
+                </NavLink>
                 <NavLink to="/audit" className={styles.navLink}>
                   Audit
                 </NavLink>
