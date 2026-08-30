@@ -1,6 +1,6 @@
 # Local Mock
 
-Stand: 2026-08-30 (aktualisiert: Identity Provider + JWT-Login)
+Stand: 2026-08-30 (aktualisiert: Identity Provider + JWT-Login; Mock-Entra-User-Persistenz + Startup-Hydration)
 
 `LOCAL_MOCK` bleibt der Default fuer lokale Entwicklung.
 
@@ -43,6 +43,27 @@ Produktive Werte: `configuration required`.
 ## Mock Entra Directory
 
 `LOCAL_MOCK` enthaelt einen lokalen Entra-ID-Mock in `MockEntraDirectoryStore`.
+
+**Persistenz (Erweiterung 2026-08-30, Teil 3):** Benutzer inkl. `PortalRoles` werden ueber
+`IMockEntraUserRepository`/`CosmosMockEntraUserRepository` im Cosmos-Container `discovery`
+persistiert (`entityType: "MockEntraUser"`, disambiguiert wie `CosmosResourceAccessRepository`
+im selben Container). Vorher lebten Rollenzuweisungen (z.B. `GovernanceAdmin`) nur im
+In-Memory-Singleton und gingen bei jedem API-Neustart verloren. Gruppen, Applications und
+Mitgliedschaften bleiben weiterhin reines In-Memory-State (nicht persistiert) — nur
+Benutzer/Rollen sind jetzt Cosmos-gestuetzt, da sie die einzige Quelle fuer den Login
+(`POST /api/auth/mock/login`) sind.
+
+**Startup-Hydration:** Beim API-Start (nur `LOCAL_MOCK`, siehe `Program.cs`) laedt
+`MockEntraDirectoryStore.HydrateFromRepositoryAsync` alle in Cosmos bekannten Benutzer in den
+In-Memory-Store, *bevor* der erste Request bedient wird. Das loest das fruehere
+Henne-Ei-Problem: `POST /api/auth/mock/login` fragt ausschliesslich den In-Memory-Store,
+und `GET /api/dev/mock-entra/login-users` re-hydrierte vorher nur Tenants, die im Store
+bereits bekannt waren — bei einem leeren Store (frischer Prozess nach Cosmos-Reset) also
+keine. Jetzt ist der Login sofort nach `dotnet run` nutzbar, sobald mindestens ein
+Mock-Entra-Benutzer in Cosmos existiert (siehe Abschnitt "Reset & Seed" unten).
+`GET /api/dev/mock-entra/login-users` bleibt als ergaenzender Refresh bestehen (synct
+weiterhin Gast-/Workload-Daten aus dem Tenant in den Mock-Stamm), ist aber nicht mehr der
+einzige Weg, den Store initial zu befuellen.
 
 Der Mock-Stamm enthaelt:
 
@@ -108,3 +129,30 @@ Sign-out (`AppLayout`) loescht das Token aus `sessionStorage` und ruft
 `POST /api/auth/mock/logout` (No-op) — die App faellt danach auf die Login-Seite zurueck,
 `client.ts` sendet ohne Token keinen `Authorization`-Header mehr (kein stiller Re-Login auf
 einen Default-User mehr, das war der urspruengliche Bug).
+
+## Reset & Seed (Erweiterung 2026-08-30, Teil 3)
+
+Die Seed-Skripte (`scripts/seed-dev-data.ps1`, `scripts/seed-large-workload.ps1`) senden
+keine freien `X-Platform-Tenant-Id`/`X-Portal-*`-Header mehr — jeder Request braucht ein
+JWT, der Tenant kommt aus dem Token-Claim (`ClaimsTenantContextAccessor`). Beide Skripte
+loggen sich daher zuerst per `POST /api/auth/mock/login` als `admin@platform.example` ein
+und haengen `Authorization: Bearer <token>` an alle folgenden Aufrufe.
+
+Empfohlener Ablauf nach einem Cosmos-Reset:
+
+1. `./scripts/reset-cosmos-dev-data.ps1` — legt die Container neu an **und** schreibt einen
+   `GovernanceAdmin`-Mock-Benutzer (`admin@platform.example`, Tenant `dev-tenant-a`) direkt
+   als Dokument in den Container `discovery` (per REST, gleiches Schema wie
+   `CosmosMockEntraUserRepository`). Ohne diesen Schritt gaebe es nach einem Reset keinen
+   Weg, sich ueberhaupt einzuloggen (leerer Mock-Stamm, kein Login moeglich, kein Seed
+   moeglich).
+2. Portal API (neu) starten — nur beim Start hydriert `MockEntraDirectoryStore` aus Cosmos
+   (siehe "Startup-Hydration" oben). Ein bereits laufender Prozess sieht den frisch
+   geschriebenen Admin-Benutzer nicht automatisch.
+3. `./scripts/seed-dev-data.ps1` bzw. `./scripts/seed-large-workload.ps1 -GuestCount <n>` —
+   loggen sich selbst ein und melden einen klaren Fehler ("... im Mock-Entra-Store nicht
+   gefunden ...") mit Hinweis auf Schritt 1/2, falls der Login fehlschlaegt.
+
+`scripts/seed-large-workload.ps1` behaelt den Parameter `-PlatformTenantId` aus
+Kompatibilitaetsgruenden, er ist aber nur noch informationell — der tatsaechliche Tenant
+kommt aus dem JWT des `-AdminMail`-Logins.

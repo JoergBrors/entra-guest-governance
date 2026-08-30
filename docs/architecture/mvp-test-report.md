@@ -356,6 +356,69 @@ Ausgefuehrte Checks:
 | `npm run test -- --run` (B2B.Portal.Web) | erfolgreich, 5 Tests bestanden |
 | Manueller E2E-Smoke-Test (laufender Emulator) | `POST /api/auth/mock/login` liefert JWT; `GET /api/workloads` mit Token 200, ohne Token 401; unbekannte Mail beim Login 404 |
 
+## 14. Erweiterung 2026-08-30 (Teil 4): Mock-Entra-User-Persistenz und Seed-Skript-Fix
+
+Die Kombination aus Teil 2 (Cosmos DB als einziger Datenprovider) und Teil 3
+(JWT-Login statt freier Header) hatte die Dev-Seed-Skripte kaputt hinterlassen und ein
+Henne-Ei-Problem eingefuehrt, das erst hier aufgeloest wurde:
+
+- `scripts/seed-dev-data.ps1`/`scripts/seed-large-workload.ps1` sendeten weiterhin nur
+  `X-Platform-Tenant-Id` ohne `Authorization`-Header — jeder Request bekam 401.
+- `MockEntraDirectoryStore` war ein reiner In-Memory-`AddSingleton` (nicht Cosmos-persistiert)
+  und leerte sich bei jedem API-Neustart. `POST /api/auth/mock/login` sucht Benutzer nur in
+  diesem Store — bei leerem Store konnte sich niemand einloggen, also konnte auch kein
+  Seed-Skript ein Token holen. `GET /api/dev/mock-entra/login-users` re-hydrierte vorher nur
+  Tenants, die im (leeren) Store bereits bekannt waren — iterierte bei leerem Store also
+  null Mal.
+- `PortalRoles` (z.B. `GovernanceAdmin`) lebten ebenfalls nur im In-Memory-Store;
+  `UpsertGuestAccount` vergab beim Hydrieren aus Cosmos-Gastdaten immer nur `["User"]`.
+
+Fix:
+
+- Neuer Port `IMockEntraUserRepository` (`src/B2B.Portal.Application/Ports/CorePorts.cs`,
+  DTO `MockEntraUserRecord` statt Referenz auf den Infrastructure-Typ `MockEntraUser` —
+  Application darf Infrastructure nicht referenzieren) mit Cosmos-Implementierung
+  `CosmosMockEntraUserRepository` (`src/B2B.Portal.Infrastructure/Data/Cosmos/`, Container
+  `discovery`, `entityType: "MockEntraUser"`, gleiches Disambiguierungsmuster wie
+  `CosmosResourceAccessRepository`/`CosmosJobRepository`).
+- `MockEntraDirectoryStore` nimmt das Repository optional im Konstruktor entgegen (Tests
+  ohne Cosmos nutzen weiterhin den parameterlosen Konstruktor), persistiert `UpsertUser`
+  fire-and-forget nach Cosmos und bekommt eine neue Methode `HydrateFromRepositoryAsync`.
+- `Program.cs` ruft `HydrateFromRepositoryAsync` direkt nach `app.Build()` auf (nur
+  `LOCAL_MOCK`) — der Store ist damit sofort nach `dotnet run` befuellt, ohne vorherigen
+  Warm-up-Request. `GET /api/dev/mock-entra/login-users` bleibt als ergaenzender Refresh
+  fuer Gast-/Workload-Sync bestehen.
+- `scripts/reset-cosmos-dev-data.ps1` schreibt nach dem Neuanlegen der Container direkt ein
+  `GovernanceAdmin`-Mock-Benutzer-Dokument (`admin@platform.example`, Tenant `dev-tenant-a`)
+  in den Container `discovery` (per REST, gleiches Schema wie
+  `CosmosMockEntraUserRepository`) und weist per Ausgabe auf den noetigen API-Neustart hin.
+- Beide Seed-Skripte loggen sich jetzt zuerst per `POST /api/auth/mock/login` ein und senden
+  `Authorization: Bearer <token>` statt `X-Platform-Tenant-Id`; klare Fehlermeldung bei
+  fehlgeschlagenem Login (Verweis auf Reset + Neustart). `-PlatformTenantId` bleibt in
+  `seed-large-workload.ps1` aus Kompatibilitaetsgruenden erhalten, ist aber nur noch
+  informationell (Tenant kommt aus dem JWT-Claim).
+
+Etablierter Ablauf: `./scripts/reset-cosmos-dev-data.ps1` → Portal API (neu) starten →
+`./scripts/seed-dev-data.ps1` / `./scripts/seed-large-workload.ps1`.
+
+Live-Verifikation (Cosmos-Emulator lief in dieser Umgebung):
+
+| Schritt | Ergebnis |
+| --- | --- |
+| `reset-cosmos-dev-data.ps1` | Container neu angelegt, `admin@platform.example` als `MockEntraUser`-Dokument in `discovery` geschrieben |
+| API-Start (`dotnet run`) | Log: `Mock-Entra-Store beim Start hydriert: 5 Benutzer bekannt.` |
+| `seed-dev-data.ps1` | Login als `admin@platform.example` (Rollen `GovernanceAdmin, User, Reviewer`) erfolgreich, Gast `anna@contoso.example` angelegt |
+| `seed-large-workload.ps1 -GuestCount 20` | Login erfolgreich, Workload + 20 Gaeste angelegt (1747 ms) |
+| `GET /api/dev/mock-entra/login-users` (anonymous) | `admin@platform.example` mit Rolle `GovernanceAdmin` gelistet |
+| `GET /api/guest-accounts` (mit Token) | 23 Gaeste sichtbar |
+
+Ausgefuehrte Checks:
+
+| Check | Ergebnis |
+| --- | --- |
+| `dotnet build -c Debug` | erfolgreich, 0 Warnungen, 0 Fehler |
+| `dotnet test -c Debug` | erfolgreich, 79 Tests bestanden (Domain 29, Architecture 5, Application 3, Integration 42), 0 fehlgeschlagen, 0 uebersprungen — Cosmos-Emulator lief, alle Cosmos-Tests liefen echt |
+
 ## Gesamtstatus
 
 **PASS WITH PENDING INTEGRATIONS** — Frontend und Backend bauen und testen vollständig

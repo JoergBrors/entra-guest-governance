@@ -158,6 +158,50 @@ public interface IExternalOrganizationRepository
     Task UpsertAsync(ExternalOrganization organization, CancellationToken ct);
 }
 
+/// <summary>
+/// Persistenz-DTO fuer einen Mock-Entra-Benutzer (Erweiterung 2026-08-30: Cosmos-Speicherung
+/// statt reinem In-Memory-Singleton, siehe
+/// B2B.Portal.Infrastructure.Directory.MockEntraDirectoryStore/MockEntraUser). Bewusst als
+/// eigener, schmaler DTO-Typ in Application/Ports (statt Referenz auf den Infrastructure-Typ
+/// MockEntraUser) definiert — Application darf Infrastructure nicht referenzieren
+/// (B2B.Portal.Architecture.Tests). Die Infrastructure-Implementierung
+/// (CosmosMockEntraUserRepository) mappt zwischen MockEntraUser und diesem DTO.
+/// </summary>
+public sealed record MockEntraUserRecord(
+    string ObjectId,
+    string UserPrincipalName,
+    string Mail,
+    string DisplayName,
+    string GivenName,
+    string Surname,
+    string CompanyName,
+    string Department,
+    string JobTitle,
+    string Sponsor,
+    string AccountEnabled,
+    string UserType,
+    IReadOnlyList<string> PortalRoles,
+    string PlatformTenantId,
+    DateTimeOffset? LastLoginAt = null);
+
+/// <summary>
+/// Persistenz fuer Mock-Entra-Benutzer (Erweiterung 2026-08-30: Cosmos-Speicherung statt
+/// reinem In-Memory-Singleton). Bewusst schmal gehalten — nur was fuer Login-Lookup,
+/// Startup-Hydration und Rollen-Persistenz gebraucht wird (siehe MockEntraDirectoryStore,
+/// das diesen Port fuer UpsertUser/Startup-Hydration nutzt).
+/// </summary>
+public interface IMockEntraUserRepository
+{
+    /// <summary>Alle Benutzer ueber ALLE Tenants (fuer die Startup-Hydration des In-Memory
+    /// Stores, bevor ein Tenant-Kontext ueberhaupt bekannt ist — analog zum Cold-Start-Problem
+    /// bei /api/dev/mock-entra/login-users).</summary>
+    Task<IReadOnlyList<MockEntraUserRecord>> ListAllAsync(CancellationToken ct);
+
+    Task<IReadOnlyList<MockEntraUserRecord>> ListAsync(TenantContext tenant, CancellationToken ct);
+
+    Task UpsertAsync(MockEntraUserRecord user, CancellationToken ct);
+}
+
 /// <summary>Ein Sheet als Zeilen von Rohwerten, gelesen ab der Kopfzeile — die technische
 /// xlsx-Bibliothek (ClosedXML) bleibt bewusst in Infrastructure gekapselt, Application
 /// kennt nur diese schmale Abstraktion (dieselbe Trennung wie bei allen anderen technischen

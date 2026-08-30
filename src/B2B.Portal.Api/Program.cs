@@ -89,6 +89,36 @@ app.UseAuthorization();
 
 Console.WriteLine($"[B2B.Portal.Api] Startmodus: {mode}, IdentityProvider: {identityProviderConfig.Kind}");
 
+// ---- Startup-Hydration Mock-Entra-Store (nur LOCAL_MOCK) -------------------
+// Erweiterung 2026-08-30 (Teil 3): loest das Henne-Ei-Problem nach einem Cosmos-Reset/
+// API-Neustart — vorher war MockEntraDirectoryStore ein reiner In-Memory-Singleton, der bei
+// jedem Prozessstart leer war, und POST /api/auth/mock/login konnte dadurch niemanden
+// finden, solange nicht zuvor GET /api/dev/mock-entra/login-users aufgerufen wurde (das
+// wiederum nur bereits bekannte Tenants re-hydriert hat — bei leerem Store also gar keine).
+// Laedt jetzt beim Start direkt aus Cosmos (IMockEntraUserRepository, der "Source of Truth"
+// fuer PortalRoles seit CosmosMockEntraUserRepository), sodass der Login direkt nach
+// `dotnet run` funktioniert, ohne vorherigen Warm-up-Request.
+if (mode == "LOCAL_MOCK")
+{
+    using var startupScope = app.Services.CreateScope();
+    var mockEntraStore = startupScope.ServiceProvider.GetRequiredService<MockEntraDirectoryStore>();
+    try
+    {
+        await mockEntraStore.HydrateFromRepositoryAsync(CancellationToken.None);
+        Console.WriteLine(
+            $"[B2B.Portal.Api] Mock-Entra-Store beim Start hydriert: {mockEntraStore.ListUsers().Count} Benutzer bekannt.");
+    }
+    catch (Exception ex)
+    {
+        // Cosmos-Emulator evtl. noch nicht bereit / nicht erreichbar — die hart codierten
+        // Default-Demo-User aus dem MockEntraDirectoryStore-Konstruktor bleiben trotzdem
+        // nutzbar, daher hier nur warnen statt den Start abzubrechen.
+        Console.WriteLine(
+            $"[B2B.Portal.Api] WARNUNG: Startup-Hydration des Mock-Entra-Store fehlgeschlagen " +
+            $"(Cosmos evtl. nicht erreichbar): {ex.Message}");
+    }
+}
+
 // ---- Health (kein Auth) ----------------------------------------------------
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", mode })).AllowAnonymous();
 

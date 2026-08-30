@@ -29,7 +29,16 @@
     .env.local, falls vorhanden).
 
 .PARAMETER PlatformTenantId
-    Platform-Tenant, unter dem die Daten angelegt werden. Default "dev-tenant-a".
+    NUR NOCH INFORMATIONELL (Erweiterung 2026-08-30 (Teil 3)). Der Tenant wird jetzt aus dem
+    PlatformTenantId-Claim des JWT abgeleitet, das POST /api/auth/mock/login fuer -AdminMail
+    ausstellt (siehe Api/Tenancy/ClaimsTenantContextAccessor.cs) - ein frei gesetzter Header
+    wird serverseitig nicht mehr gelesen. Bleibt als Parameter erhalten, um bestehende
+    Aufrufe nicht zu brechen; steuert nur noch die Ausgabe der Beispiel-curl-Kommandos.
+
+.PARAMETER AdminMail
+    Mock-Entra-Benutzer, mit dem sich das Skript vor dem Seeden einloggt (POST
+    /api/auth/mock/login). Muss GovernanceAdmin-Rechte haben. Default "admin@platform.example"
+    (siehe scripts/reset-cosmos-dev-data.ps1, das diesen Benutzer nach einem Reset anlegt).
 
 .PARAMETER GuestCount
     Anzahl zu erzeugender Gaeste. Default 500, maximal 5000 (serverseitig begrenzt).
@@ -39,7 +48,7 @@
 
 .EXAMPLE
     ./scripts/seed-large-workload.ps1
-    # 500 Gaeste, Default-Workload, gegen http://localhost:5000, Tenant dev-tenant-a.
+    # 500 Gaeste, Default-Workload, gegen http://localhost:5000, Login als admin@platform.example.
 
 .EXAMPLE
     ./scripts/seed-large-workload.ps1 -GuestCount 1500 -WorkloadName "Onboarding-Projekt Nord"
@@ -47,6 +56,7 @@
 param(
     [string]$ApiBaseUrl,
     [string]$PlatformTenantId = "dev-tenant-a",
+    [string]$AdminMail = "admin@platform.example",
     [int]$GuestCount = 500,
     [string]$WorkloadName
 )
@@ -62,7 +72,7 @@ if (-not $ApiBaseUrl) {
     }
 }
 
-Write-Host "Seede $GuestCount Gaeste + 1 Workload gegen $ApiBaseUrl (Tenant $PlatformTenantId)..." -ForegroundColor Cyan
+Write-Host "Seede $GuestCount Gaeste + 1 Workload gegen $ApiBaseUrl (Login als $AdminMail)..." -ForegroundColor Cyan
 
 try {
     $health = Invoke-RestMethod -Uri "$ApiBaseUrl/health" -ErrorAction Stop
@@ -74,10 +84,26 @@ catch {
     throw "Portal API unter $ApiBaseUrl nicht erreichbar oder nicht im LOCAL_MOCK-Modus. Starte sie zuerst (siehe README Quick Start). Fehler: $($_.Exception.Message)"
 }
 
+# Erweiterung 2026-08-30 (Teil 3): freie X-Platform-Tenant-Id-Header wurden durch ein JWT
+# Bearer Token ersetzt - der Tenant kommt jetzt aus dem Token-Claim, nicht mehr aus
+# -PlatformTenantId (siehe Parameterbeschreibung oben und ClaimsTenantContextAccessor.cs).
+try {
+    $login = Invoke-RestMethod -Method Post -Uri "$ApiBaseUrl/api/auth/mock/login" `
+        -ContentType "application/json" -Body (@{ mail = $AdminMail } | ConvertTo-Json) -ErrorAction Stop
+}
+catch {
+    throw "Login als '$AdminMail' fehlgeschlagen: $($_.Exception.Message)`n" +
+        "-> '$AdminMail' wurde im Mock-Entra-Store nicht gefunden. Fuehre zuerst " +
+        "./scripts/reset-cosmos-dev-data.ps1 aus, starte die Portal API danach (neu) und " +
+        "versuche es dann erneut (siehe docs/development/local-mock.md)."
+}
+
+Write-Host "Angemeldet als '$($login.mail)' (Tenant '$($login.platformTenantId)', Rollen: $($login.roles -join ', '))."
+
 $body = @{ guestCount = $GuestCount }
 if ($WorkloadName) { $body.workloadName = $WorkloadName }
 
-$headers = @{ "X-Platform-Tenant-Id" = $PlatformTenantId; "Content-Type" = "application/json" }
+$headers = @{ "Authorization" = "Bearer $($login.token)"; "Content-Type" = "application/json" }
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $result = Invoke-RestMethod -Method Post -Uri "$ApiBaseUrl/api/dev/seed/large-workload" `
     -Headers $headers -Body ($body | ConvertTo-Json) -ErrorAction Stop
@@ -89,6 +115,7 @@ Write-Host "  Workload: '$($result.workloadName)' ($($result.workloadId))"
 Write-Host "  Rollen:   $($result.roles.name -join ', ')"
 Write-Host "  Gaeste:   $($result.guestCount)"
 Write-Host ""
-Write-Host "Ansehen: Web-UI unter Guest Pool / Workloads (Admin-Ansicht), oder direkt:" -ForegroundColor Cyan
-Write-Host "  curl -H 'X-Platform-Tenant-Id: $PlatformTenantId' $ApiBaseUrl/api/guest-accounts"
-Write-Host "  curl -H 'X-Platform-Tenant-Id: $PlatformTenantId' $ApiBaseUrl/api/workloads"
+Write-Host "Ansehen: Web-UI unter Guest Pool / Workloads (Admin-Ansicht), oder direkt (Login-Token noetig):" -ForegroundColor Cyan
+Write-Host "  `$token = (Invoke-RestMethod -Method Post -Uri '$ApiBaseUrl/api/auth/mock/login' -ContentType 'application/json' -Body (@{ mail = '$AdminMail' } | ConvertTo-Json)).token"
+Write-Host "  Invoke-RestMethod -Headers @{ Authorization = `"Bearer `$token`" } $ApiBaseUrl/api/guest-accounts"
+Write-Host "  Invoke-RestMethod -Headers @{ Authorization = `"Bearer `$token`" } $ApiBaseUrl/api/workloads"

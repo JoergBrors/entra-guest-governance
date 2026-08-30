@@ -36,7 +36,6 @@ public static class InfrastructureServiceCollectionExtensions
 
         services.AddSingleton<IClock, SystemClock>();
         services.AddSingleton<ISpreadsheetReader, ClosedXmlSpreadsheetReader>();
-        services.AddSingleton<MockEntraDirectoryStore>();
 
         // Identity Provider (Erweiterung 2026-08-30: Ablösung der freien X-Portal-*-Header
         // durch JWT). EntraIdMock ist unter LOCAL_MOCK der Default, EntraId bleibt ein reiner
@@ -69,6 +68,12 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<IAuditWriter, CosmosAuditWriter>();
         services.AddSingleton<IWorkloadScenarioRepository, CosmosWorkloadScenarioRepository>();
         services.AddSingleton<IExternalOrganizationRepository, CosmosExternalOrganizationRepository>();
+        services.AddSingleton<IMockEntraUserRepository, CosmosMockEntraUserRepository>();
+
+        // Nimmt IMockEntraUserRepository als optionale Abhaengigkeit (siehe MockGuestDirectory.cs)
+        // fuer Persistenz von PortalRoles und Startup-Hydration (Program.cs ruft
+        // HydrateFromRepositoryAsync beim Start auf, siehe dortiger LOCAL_MOCK-Block).
+        services.AddSingleton(sp => new MockEntraDirectoryStore(sp.GetRequiredService<IMockEntraUserRepository>()));
 
         if (directoryProvider.Equals("graph", StringComparison.OrdinalIgnoreCase) && mode != "LOCAL_MOCK")
         {

@@ -57,8 +57,22 @@ public sealed class MockEntraDirectoryStore
     private readonly Dictionary<string, MockEntraApplicationSignIn> _applicationSignIns = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HashSet<string>> _membersByGroupId = new(StringComparer.OrdinalIgnoreCase);
 
-    public MockEntraDirectoryStore()
+    // Optional, damit bestehende Tests/Call-Sites ohne Cosmos weiterhin einen reinen
+    // In-Memory-Store bekommen (siehe MockEntraDirectoryStoreTests). In der API ist dies
+    // immer gesetzt (Erweiterung 2026-08-30 (Teil 3): Persistenz der PortalRoles, siehe
+    // IMockEntraUserRepository) — UpsertUser schreibt dann fire-and-forget durch, und
+    // HydrateFromRepositoryAsync laedt beim API-Start alle bekannten Benutzer nach, damit
+    // POST /api/auth/mock/login sofort nach dotnet run funktioniert (vorher: leerer Store
+    // nach jedem Prozess-Neustart, kein Login moeglich, siehe docs/development/local-mock.md).
+    private readonly IMockEntraUserRepository? _repository;
+
+    public MockEntraDirectoryStore() : this(null)
     {
+    }
+
+    public MockEntraDirectoryStore(IMockEntraUserRepository? repository)
+    {
+        _repository = repository;
         SeedUser(new("mock-obj-anna", "anna_contoso.example#EXT#@platform.example", "anna@contoso.example",
             "Anna Contoso", "Anna", "Contoso", "Contoso Consulting", "Logistics",
             "External Consultant", "sponsor.mueller@platform.example", "true", "Guest", ["User"]));
@@ -162,8 +176,68 @@ public sealed class MockEntraDirectoryStore
                 : user.PlatformTenantId,
         };
             SeedUser(normalized);
+            PersistUser(normalized);
             return normalized;
         }
+    }
+
+    /// <summary>
+    /// Laedt beim API-Start alle in Cosmos bekannten Mock-Entra-Benutzer (inkl. persistierter
+    /// PortalRoles) in den In-Memory-Store, damit POST /api/auth/mock/login sofort nach
+    /// Prozessstart funktioniert — vorher war der Store bis zum ersten (Anonymous-)Aufruf von
+    /// GET /api/dev/mock-entra/login-users leer, und DIESER Endpoint hydrierte nur Tenants,
+    /// die im (leeren) Store bereits bekannt waren: ein Henne-Ei-Problem nach jedem Reset/
+    /// Neustart (siehe docs/development/local-mock.md). Ergaenzt, ueberschreibt aber nicht die
+    /// hart codierten Default-Demo-User aus dem Konstruktor, falls Cosmos (noch) leer ist.
+    /// </summary>
+    public async Task HydrateFromRepositoryAsync(CancellationToken ct)
+    {
+        if (_repository is null)
+        {
+            return;
+        }
+
+        var persisted = await _repository.ListAllAsync(ct);
+        lock (_gate)
+        {
+            foreach (var user in persisted)
+            {
+                SeedUser(new MockEntraUser(
+                    user.ObjectId, user.UserPrincipalName, user.Mail, user.DisplayName, user.GivenName,
+                    user.Surname, user.CompanyName, user.Department, user.JobTitle, user.Sponsor,
+                    user.AccountEnabled, user.UserType, user.PortalRoles, user.LastLoginAt, user.PlatformTenantId));
+            }
+        }
+    }
+
+    private void PersistUser(MockEntraUser user)
+    {
+        if (_repository is null)
+        {
+            return;
+        }
+
+        var record = new MockEntraUserRecord(
+            user.ObjectId, user.UserPrincipalName, user.Mail, user.DisplayName, user.GivenName,
+            user.Surname, user.CompanyName, user.Department, user.JobTitle, user.Sponsor,
+            user.AccountEnabled, user.UserType, user.PortalRoles, user.PlatformTenantId, user.LastLoginAt);
+
+        // Fire-and-forget: UpsertUser wird auch aus synchronen Minimal-API-Handlern
+        // (POST/PUT /api/dev/mock-entra/users) und aus HydrateMockEntraFromRepositoriesAsync
+        // (pro Gast in einer Schleife) aufgerufen — ein await hier wuerde UpsertUser async
+        // machen und alle Call-Sites in Program.cs aendern. Verlorene Schreibversuche bei
+        // einem Absturz zwischen Login und Persistierung sind fuer LOCAL_MOCK-Devdaten
+        // akzeptabel; Fehler werden geloggt statt verschluckt.
+        _ = _repository.UpsertAsync(record, CancellationToken.None)
+            .ContinueWith(t =>
+            {
+                if (t.Exception is not null)
+                {
+                    Console.WriteLine(
+                        $"[MockEntraDirectoryStore] WARNUNG: Persistieren von {user.Mail} nach Cosmos fehlgeschlagen: " +
+                        $"{t.Exception.GetBaseException().Message}");
+                }
+            }, TaskScheduler.Default);
     }
 
     public bool DeleteUser(string objectId)
