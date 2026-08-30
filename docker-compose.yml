@@ -1,0 +1,118 @@
+name: entra-guest-governance
+
+x-portal-env: &portal-env
+  B2B_MODE: LOCAL_MOCK
+  DIRECTORY_PROVIDER: mock
+  EMAIL_PROVIDER: mock
+  DATA_PROVIDER: cosmos
+  JOB_QUEUE_PROVIDER: cosmos
+  ALLOW_GRAPH_WRITES: "false"
+  ALLOW_GUEST_DELETE: "false"
+  COSMOS_EMULATOR_ENDPOINT: https://cosmos:8081
+  COSMOS_EMULATOR_KEY: C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==
+  COSMOS_EMULATOR_ALLOW_INSECURE_TLS: "true"
+  COSMOS_DATABASE_ID: b2b-governance-dev
+  VITE_DEV_PLATFORM_TENANT_ID: dev-tenant-a
+
+services:
+  cosmos:
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+    platform: linux/amd64
+    container_name: entra-governance-cosmos
+    environment:
+      AZURE_COSMOS_EMULATOR_PARTITION_COUNT: "10"
+      AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE: "true"
+    ports:
+      - "8081:8081"
+      - "10250-10255:10250-10255"
+    volumes:
+      - cosmos-data:/tmp/cosmos/appdata
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k -f https://localhost:8081/_explorer/emulator.pem >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+
+  cosmos-init:
+    image: mcr.microsoft.com/powershell:lts-alpine-3.20
+    container_name: entra-governance-cosmos-init
+    depends_on:
+      cosmos:
+        condition: service_healthy
+    volumes:
+      - ./docker/cosmos-init.ps1:/scripts/cosmos-init.ps1:ro
+    command:
+      - pwsh
+      - /scripts/cosmos-init.ps1
+      - -Endpoint
+      - https://cosmos:8081
+      - -DatabaseId
+      - b2b-governance-dev
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: src/B2B.Portal.Api/Dockerfile
+    container_name: entra-governance-api
+    depends_on:
+      cosmos-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *portal-env
+      ASPNETCORE_URLS: http://+:8080
+      WEB_BASE_URL: http://localhost:5301
+    ports:
+      - "5000:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  worker:
+    build:
+      context: .
+      dockerfile: src/B2B.Portal.Worker/Dockerfile
+    container_name: entra-governance-worker
+    depends_on:
+      cosmos-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *portal-env
+
+  web:
+    build:
+      context: .
+      dockerfile: src/B2B.Portal.Web/Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:5000
+        VITE_DEV_PLATFORM_TENANT_ID: dev-tenant-a
+    container_name: entra-governance-web
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "5301:80"
+
+  seed:
+    image: curlimages/curl:latest
+    container_name: entra-governance-seed
+    profiles: ["seed"]
+    depends_on:
+      api:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - >
+        curl -f -X POST http://api:8080/api/dev/seed/large-workload
+        -H 'Content-Type: application/json'
+        -H 'X-Platform-Tenant-Id: dev-tenant-a'
+        -H 'X-Portal-User-Mail: admin@platform.example'
+        -H 'X-Portal-Roles: GovernanceAdmin,User,Reviewer'
+        --data '{"guestCount":120,"workloadName":"Demo Governance Workload"}'
+    restart: "no"
+
+volumes:
+  cosmos-data:

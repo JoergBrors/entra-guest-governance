@@ -14,6 +14,7 @@ public interface IJobQueue
     Task<JobEnvelope?> DequeueAsync(CancellationToken ct);
 
     Task CompleteAsync(Guid jobId, CancellationToken ct);
+    Task CancelAsync(Guid jobId, CancellationToken ct);
 
     /// <summary>
     /// Markiert einen Job für einen erneuten Versuch. Liefert den neuen, dauerhaften
@@ -123,6 +124,7 @@ public interface IReviewRepository
 public interface IJobRepository
 {
     Task<DirectoryOperation?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
+    Task<IReadOnlyList<DirectoryOperation>> ListAsync(TenantContext tenant, CancellationToken ct);
     Task<IReadOnlyList<DirectoryOperation>> ListOpenSecurityRelevantAsync(
         TenantContext tenant, Guid guestId, CancellationToken ct);
     Task UpsertAsync(DirectoryOperation job, CancellationToken ct);

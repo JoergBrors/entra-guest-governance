@@ -1,4 +1,5 @@
 using B2B.Portal.Application.Services;
+using B2B.Portal.Application.Workloads;
 using B2B.Portal.Infrastructure;
 using B2B.Portal.Worker;
 using B2B.Portal.Worker.Handlers.Discovery;
@@ -8,6 +9,7 @@ using B2B.Portal.Worker.Handlers.Notifications;
 using B2B.Portal.Worker.Handlers.Provisioning;
 using B2B.Portal.Worker.Handlers.Reconciliation;
 using B2B.Portal.Worker.Handlers.Reviews;
+using B2B.Portal.Worker.Handlers.Workloads;
 using B2B.Portal.Worker.Processing;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -28,6 +30,7 @@ builder.Services.AddB2BInfrastructure(builder.Configuration);
 builder.Services.AddSingleton<AuditService>();
 builder.Services.AddSingleton<ProvisioningService>();
 builder.Services.AddSingleton<LifecycleService>();
+builder.Services.AddSingleton<WorkloadManagementService>();
 
 // Handlergruppen registrieren (MVP-Dokument Abschnitt 5).
 builder.Services.AddSingleton<IJobHandler, InvitationHandler>();
@@ -37,6 +40,7 @@ builder.Services.AddSingleton<IJobHandler, RevokeWorkloadRoleHandler>();
 builder.Services.AddSingleton<IJobHandler, DeployScenarioHandler>();
 builder.Services.AddSingleton<IJobHandler, DiscoveryHandler>();
 builder.Services.AddSingleton<IJobHandler, ReconciliationHandler>();
+builder.Services.AddSingleton<IJobHandler, SyncWorkloadPatternResourcesHandler>();
 builder.Services.AddSingleton<IJobHandler, StartReviewHandler>();
 builder.Services.AddSingleton<IJobHandler, ApplyReviewDecisionHandler>();
 builder.Services.AddSingleton<IJobHandler>(sp => new NotificationHandler(
@@ -47,11 +51,17 @@ builder.Services.AddSingleton<IJobHandler, ValidateDeletionHandler>();
 builder.Services.AddSingleton<IJobHandler, DisableGuestHandler>();
 builder.Services.AddSingleton<IJobHandler>(sp => new DeleteGuestHandler(
     sp.GetRequiredService<B2B.Portal.Application.Ports.IGuestAccountRepository>(),
+    sp.GetRequiredService<B2B.Portal.Application.Ports.IAssignmentRepository>(),
+    sp.GetRequiredService<LifecycleService>(),
     allowGuestDelete: bool.TryParse(builder.Configuration["ALLOW_GUEST_DELETE"], out var d) && d,
     sp.GetRequiredService<ILogger<DeleteGuestHandler>>()));
 
 builder.Services.AddSingleton<JobDispatcher>();
 builder.Services.AddHostedService<PollingWorker>();
+if (mode == "LOCAL_MOCK")
+{
+    builder.Services.AddHostedService<ApplicationSignInSyncWorker>();
+}
 
 var host = builder.Build();
 host.Run();

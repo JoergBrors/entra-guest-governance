@@ -113,6 +113,9 @@ internal sealed class GuestAccountDocument
     [JsonPropertyName("sponsor")]
     public string? Sponsor { get; init; }
 
+    [JsonPropertyName("userType")]
+    public string? UserType { get; init; }
+
     [JsonPropertyName("accountState")]
     public required GuestAccountState AccountState { get; init; }
 
@@ -132,6 +135,7 @@ internal sealed class GuestAccountDocument
         DisplayName = g.DisplayName,
         ExternalOrganizationId = g.ExternalOrganizationId,
         Sponsor = g.Sponsor,
+        UserType = g.UserType,
         AccountState = g.AccountState,
         CreatedAt = g.CreatedAt,
         UpdatedAt = g.UpdatedAt,
@@ -149,6 +153,7 @@ internal sealed class GuestAccountDocument
             DisplayName = DisplayName,
             ExternalOrganizationId = ExternalOrganizationId,
             Sponsor = Sponsor,
+            UserType = string.IsNullOrWhiteSpace(UserType) ? "Guest" : UserType,
             CreatedAt = CreatedAt,
             UpdatedAt = UpdatedAt,
         };

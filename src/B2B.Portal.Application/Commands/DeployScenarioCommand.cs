@@ -37,7 +37,7 @@ public sealed class DeployScenarioCommandHandler(
             request.PlatformTenantId, directoryTenantId: null, JobTypes.DeployScenario,
             nameof(WorkloadScenario), scenario.Id.ToString(), hash,
             new { ScenarioId = scenario.Id, scenario.WorkloadId },
-            correlationId, ct);
+            correlationId, ct, triggeredBy: request.Actor, workloadId: scenario.WorkloadId);
 
         await auditService.RecordAsync(
             request.PlatformTenantId, request.Actor, "DeployScenario", nameof(WorkloadScenario),

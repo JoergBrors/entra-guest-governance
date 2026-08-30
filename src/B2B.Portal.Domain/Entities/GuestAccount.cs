@@ -21,6 +21,7 @@ public sealed class GuestAccount
     public required string DisplayName { get; set; }
     public Guid? ExternalOrganizationId { get; set; }
     public string? Sponsor { get; set; }
+    public string UserType { get; set; } = "Guest";
 
     public GuestAccountState AccountState { get; private set; } = GuestAccountState.Discovered;
 

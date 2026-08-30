@@ -52,7 +52,8 @@ public sealed class GrantWorkloadRoleCommandHandler(
         await provisioningService.EnqueueJobAsync(
             request.PlatformTenantId, directoryTenantId: null, JobTypes.GrantWorkloadRole,
             nameof(GuestWorkloadAssignment), assignment.Id.ToString(), hash,
-            new { request.GuestId, request.WorkloadId, request.RoleId }, correlationId, ct);
+            new { request.GuestId, request.WorkloadId, request.RoleId },
+            correlationId, ct, triggeredBy: request.Actor, workloadId: request.WorkloadId);
 
         await auditService.RecordAsync(
             request.PlatformTenantId, request.Actor, "GrantWorkloadRole", nameof(GuestWorkloadAssignment),
@@ -83,7 +84,8 @@ public sealed class RevokeWorkloadRoleCommandHandler(
         await provisioningService.EnqueueJobAsync(
             request.PlatformTenantId, directoryTenantId: null, JobTypes.RevokeWorkloadRole,
             nameof(GuestWorkloadAssignment), assignment.Id.ToString(), hash,
-            new { assignment.GuestId, assignment.WorkloadId, assignment.RoleId }, correlationId, ct);
+            new { assignment.GuestId, assignment.WorkloadId, assignment.RoleId },
+            correlationId, ct, triggeredBy: request.Actor, workloadId: assignment.WorkloadId);
 
         await auditService.RecordAsync(
             request.PlatformTenantId, request.Actor, "RevokeWorkloadRole", nameof(GuestWorkloadAssignment),

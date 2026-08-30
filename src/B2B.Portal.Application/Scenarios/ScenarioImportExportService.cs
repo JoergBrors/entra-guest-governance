@@ -37,6 +37,11 @@ public sealed class ScenarioImportExportService(
             errors.Add($"Workload '{template.WorkloadName}' nicht gefunden.");
             return new ScenarioImportResult(null, createdResourceNames, errors);
         }
+        if (workload.IsDefault)
+        {
+            errors.Add("Der Default-Workload dient nur als Gruppen-Anker; Szenarien sind dort nicht erlaubt.");
+            return new ScenarioImportResult(null, createdResourceNames, errors);
+        }
 
         var existingScenarios = await scenarioRepository.ListByWorkloadAsync(tenant, workload.Id, ct);
         var scenario = existingScenarios.FirstOrDefault(
@@ -59,16 +64,10 @@ public sealed class ScenarioImportExportService(
 
             if (resource is null)
             {
-                resource = new WorkloadResource
-                {
-                    WorkloadId = workload.Id,
-                    ResourceType = ruleDto.ResourceType,
-                    ExternalId = ruleDto.ResourceName,
-                    Managed = true,
-                };
-                workload.Resources.Add(resource);
-                workloadChanged = true;
-                createdResourceNames.Add($"{ruleDto.ResourceType}:{ruleDto.ResourceName}");
+                errors.Add(
+                    $"Ressource '{ruleDto.ResourceType}:{ruleDto.ResourceName}' gehört nicht zum Workload '{workload.Name}'. " +
+                    "Szenarien dürfen nur Workload-Gruppen verwenden.");
+                continue;
             }
 
             if (ruleDto.Condition is JsonElement condition)

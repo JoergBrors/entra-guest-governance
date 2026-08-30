@@ -15,6 +15,7 @@ public sealed class LocalJobQueue : IJobQueue
     private readonly ConcurrentDictionary<Guid, JobEnvelope> _inFlight = new();
     private readonly ConcurrentDictionary<Guid, (JobEnvelope Job, string Error)> _deadLetters = new();
     private readonly ConcurrentDictionary<Guid, int> _attempts = new();
+    private readonly ConcurrentDictionary<Guid, byte> _cancelled = new();
     public int RetryCounter { get; private set; }
 
     public IReadOnlyCollection<(JobEnvelope Job, string Error)> DeadLetters => _deadLetters.Values.ToArray();
@@ -27,8 +28,13 @@ public sealed class LocalJobQueue : IJobQueue
 
     public Task<JobEnvelope?> DequeueAsync(CancellationToken ct)
     {
-        if (_pending.TryDequeue(out var job))
+        while (_pending.TryDequeue(out var job))
         {
+            if (_cancelled.ContainsKey(job.JobId))
+            {
+                continue;
+            }
+
             _inFlight[job.JobId] = job;
             return Task.FromResult<JobEnvelope?>(job);
         }
@@ -38,6 +44,14 @@ public sealed class LocalJobQueue : IJobQueue
 
     public Task CompleteAsync(Guid jobId, CancellationToken ct)
     {
+        _inFlight.TryRemove(jobId, out _);
+        _cancelled.TryRemove(jobId, out _);
+        return Task.CompletedTask;
+    }
+
+    public Task CancelAsync(Guid jobId, CancellationToken ct)
+    {
+        _cancelled[jobId] = 0;
         _inFlight.TryRemove(jobId, out _);
         return Task.CompletedTask;
     }

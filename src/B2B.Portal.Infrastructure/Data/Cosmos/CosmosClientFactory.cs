@@ -21,6 +21,8 @@ public sealed class CosmosClientFactory
         var endpoint = configuration["COSMOS_EMULATOR_ENDPOINT"];
         var key = configuration["COSMOS_EMULATOR_KEY"];
         var databaseId = configuration["COSMOS_DATABASE_ID"] ?? "b2b-governance-dev";
+        var allowInsecureEmulatorTls = bool.TryParse(configuration["COSMOS_EMULATOR_ALLOW_INSECURE_TLS"], out var insecureTls)
+            && insecureTls;
 
         if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(key))
         {
@@ -57,7 +59,7 @@ public sealed class CosmosClientFactory
 
         var isEmulator = endpoint.Contains("localhost", StringComparison.OrdinalIgnoreCase)
             || endpoint.Contains("127.0.0.1", StringComparison.Ordinal);
-        if (isEmulator)
+        if (isEmulator || allowInsecureEmulatorTls)
         {
             clientOptions.HttpClientFactory = () =>
             {

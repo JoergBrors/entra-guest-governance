@@ -15,6 +15,8 @@ public sealed class DirectoryOperation
     public required string JobType { get; init; }
     public required string EntityType { get; init; }
     public required string EntityId { get; init; }
+    public string? TriggeredBy { get; init; }
+    public Guid? WorkloadId { get; init; }
     public required Guid CorrelationId { get; init; }
     public required string DesiredStateHash { get; init; }
     public JobStatus Status { get; set; } = JobStatus.Pending;
@@ -49,9 +51,10 @@ public sealed record JobEnvelope(
         string entityId,
         string desiredStateHash,
         JsonElement payload,
-        Guid? correlationId = null) =>
+        Guid? correlationId = null,
+        Guid? jobId = null) =>
         new(
-            Guid.NewGuid(),
+            jobId ?? Guid.NewGuid(),
             platformTenantId,
             directoryTenantId,
             jobType,
@@ -86,4 +89,5 @@ public static class JobTypes
     public const string DeleteGuest = nameof(DeleteGuest);
     public const string SendNotification = nameof(SendNotification);
     public const string DeployScenario = nameof(DeployScenario);
+    public const string SyncWorkloadPatternResources = nameof(SyncWorkloadPatternResources);
 }

@@ -33,7 +33,7 @@ export function MyWorkloadsPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.listWorkloads()
+    api.listMyWorkloads()
       .then(setWorkloads)
       .catch((e: Error) => setError(e.message));
   }, []);

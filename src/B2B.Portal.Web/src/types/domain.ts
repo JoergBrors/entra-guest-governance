@@ -15,6 +15,7 @@ export interface GuestAccount {
   displayName: string;
   externalOrganizationId?: string | null;
   sponsor?: string | null;
+  userType: string;
   accountState: GuestAccountState;
   createdAt: string;
   updatedAt: string;
@@ -24,6 +25,8 @@ export interface WorkloadRole {
   id: string;
   workloadId: string;
   name: string;
+  applicationId?: string | null;
+  applicationRoleId?: string | null;
   resourceMappings: string[];
 }
 
@@ -42,8 +45,34 @@ export interface Workload {
   owner?: string | null;
   templateId?: string | null;
   active: boolean;
+  isDefault: boolean;
+  administrativeUnitExternalId?: string | null;
+  applicationExternalId?: string | null;
+  resourceNamePatterns: string[];
   roles: WorkloadRole[];
   resources: WorkloadResource[];
+}
+
+export type JobStatus = 'Pending' | 'Running' | 'Success' | 'Retry' | 'Failed' | 'DeadLetter' | 'Cancelled';
+
+export interface JobStatusResponse {
+  id: string;
+  jobType: string;
+  entityType: string;
+  entityId: string;
+  triggeredBy?: string | null;
+  workloadId?: string | null;
+  workloadName?: string | null;
+  status: JobStatus;
+  retryCount: number;
+  lastError?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkloadMutationResponse {
+  workload: Workload;
+  patternSyncJobId?: string | null;
 }
 
 export interface WorkloadAssignmentCounts {
@@ -201,4 +230,84 @@ export interface GuestImportResult {
   updatedGuestCount: number;
   assignmentCount: number;
   warningCount: number;
+}
+
+export interface UiConfiguration {
+  platformTenantId?: string | null;
+  themeId: string;
+  branding: {
+    productName: string;
+  };
+  user: {
+    mail: string;
+    roles: string[];
+  };
+}
+
+export interface MockEntraUser {
+  objectId: string;
+  userPrincipalName: string;
+  mail: string;
+  displayName: string;
+  givenName: string;
+  surname: string;
+  companyName: string;
+  department: string;
+  jobTitle: string;
+  sponsor: string;
+  accountEnabled: string;
+  userType: string;
+  portalRoles: string[];
+  lastLoginAt?: string | null;
+}
+
+export interface MockEntraGroup {
+  objectId: string;
+  displayName: string;
+  mailNickname: string;
+  description: string;
+  groupTypes: string[];
+  mailEnabled: boolean;
+  securityEnabled: boolean;
+  resourceProvisioningOptions: string[];
+}
+
+export interface MockEntraApplicationRole {
+  id: string;
+  value: string;
+  displayName: string;
+  description: string;
+}
+
+export interface MockEntraApplication {
+  objectId: string;
+  appId: string;
+  displayName: string;
+  appRoles: MockEntraApplicationRole[];
+}
+
+export interface MockEntraMembership {
+  groupId: string;
+  groupName: string;
+  entraObjectId: string;
+}
+
+export interface MockEntraApplicationSignIn {
+  id: string;
+  appId: string;
+  entraObjectId: string;
+  lastLoginAt: string;
+}
+
+export interface ScenarioUser {
+  guestId: string;
+  entraObjectId: string;
+  mail: string;
+  displayName: string;
+  userType: string;
+  roleName: string;
+  assignmentStatus: string;
+  active: boolean;
+  lastLoginAt?: string | null;
+  applicationLastLoginAt?: string | null;
 }

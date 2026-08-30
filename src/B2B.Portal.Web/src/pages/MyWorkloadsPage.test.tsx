@@ -23,7 +23,7 @@ vi.mock('@fluentui/react-components', () => ({
 }));
 
 vi.mock('../api/client', () => ({
-  api: { listWorkloads: vi.fn() },
+  api: { listMyWorkloads: vi.fn() },
 }));
 
 const sampleWorkload: Workload = {
@@ -33,13 +33,16 @@ const sampleWorkload: Workload = {
   owner: 'owner@contoso.example',
   templateId: null,
   active: true,
+  isDefault: false,
+  administrativeUnitExternalId: null,
+  resourceNamePatterns: [],
   roles: [{ id: 'role-1', workloadId: 'wl-1', name: 'Reader', resourceMappings: [] }],
   resources: [{ id: 'res-1', workloadId: 'wl-1', resourceType: 'SecurityGroup', externalId: 'SG-SAP-READER', managed: true }],
 };
 
 describe('MyWorkloadsPage', () => {
   beforeEach(() => {
-    vi.mocked(api.listWorkloads).mockResolvedValue([sampleWorkload]);
+    vi.mocked(api.listMyWorkloads).mockResolvedValue([sampleWorkload]);
   });
 
   it('zeigt Workload-Namen und Rollen, aber keine technischen Ressourcendetails', async () => {
@@ -53,7 +56,7 @@ describe('MyWorkloadsPage', () => {
   });
 
   it('zeigt einen Hinweis, wenn keine Workloads zugeordnet sind', async () => {
-    vi.mocked(api.listWorkloads).mockResolvedValue([]);
+    vi.mocked(api.listMyWorkloads).mockResolvedValue([]);
 
     render(<MyWorkloadsPage />);
 

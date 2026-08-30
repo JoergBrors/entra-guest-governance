@@ -114,6 +114,7 @@ internal sealed class WorkloadScenarioDocument
     [JsonPropertyName("workloadId")] public required Guid WorkloadId { get; init; }
     [JsonPropertyName("name")] public required string Name { get; init; }
     [JsonPropertyName("rules")] public required List<ScenarioResourceRuleDocument> Rules { get; init; }
+    [JsonPropertyName("scenarioManagers")] public List<string>? ScenarioManagers { get; init; }
     [JsonPropertyName("active")] public required bool Active { get; init; }
     [JsonPropertyName("createdAt")] public required DateTimeOffset CreatedAt { get; init; }
     [JsonPropertyName("updatedAt")] public required DateTimeOffset UpdatedAt { get; init; }
@@ -125,6 +126,7 @@ internal sealed class WorkloadScenarioDocument
         WorkloadId = s.WorkloadId,
         Name = s.Name,
         Rules = [.. s.Rules.Select(ScenarioResourceRuleDocument.FromEntity)],
+        ScenarioManagers = [.. s.ScenarioManagers],
         Active = s.Active,
         CreatedAt = s.CreatedAt,
         UpdatedAt = s.UpdatedAt,
@@ -143,6 +145,7 @@ internal sealed class WorkloadScenarioDocument
             UpdatedAt = UpdatedAt,
         };
         scenario.Rules.AddRange((Rules ?? []).Select(r => r.ToEntity()));
+        scenario.ScenarioManagers.AddRange(ScenarioManagers ?? []);
         return scenario;
     }
 }

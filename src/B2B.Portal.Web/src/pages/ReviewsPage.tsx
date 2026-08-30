@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
-  Title2, Text, Card, Badge, Spinner, makeStyles, tokens,
+  Title2, Text, Card, Badge, Spinner, makeStyles, tokens, Button, MessageBar, MessageBarBody,
 } from '@fluentui/react-components';
 import { api } from '../api/client';
 import type { ReviewInstance } from '../types/domain';
@@ -30,18 +30,38 @@ export function ReviewsPage() {
   const styles = useStyles();
   const [reviews, setReviews] = useState<ReviewInstance[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [busyItemId, setBusyItemId] = useState<string | null>(null);
 
-  useEffect(() => {
+  const reload = () => {
     api.listOpenReviews().then(setReviews).catch((e: Error) => setError(e.message));
-  }, []);
+  };
 
-  if (error) return <Text>Fehler: {error}</Text>;
+  useEffect(reload, []);
+
+  const decide = async (reviewInstanceId: string, reviewItemId: string, decision: 'Keep' | 'Remove' | 'Escalated') => {
+    setBusyItemId(reviewItemId);
+    setError(null);
+    try {
+      await api.decideReviewItem(reviewInstanceId, reviewItemId, decision);
+      reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusyItemId(null);
+    }
+  };
+
   if (!reviews) return <Spinner label="Lade Reviews…" />;
 
   return (
     <div>
       <Title2>Reviews</Title2>
       <Text>Laufende interne Review-Instanzen (Snapshot, Keep/Remove).</Text>
+      {error && (
+        <MessageBar intent="error" style={{ marginTop: 12 }}>
+          <MessageBarBody>{error}</MessageBarBody>
+        </MessageBar>
+      )}
 
       <div className={styles.list}>
         {reviews.length === 0 && <Text>Keine offenen Reviews.</Text>}
@@ -54,6 +74,19 @@ export function ReviewsPage() {
                 <Text size={200}>Assignment {item.assignmentId.slice(0, 8)}</Text>
                 {item.reason && <Text size={200} className={styles.reason}>{item.reason}</Text>}
                 <Badge color={decisionColor[item.decision]}>{item.decision}</Badge>
+                {item.decision === 'Pending' && (
+                  <div>
+                    <Button size="small" disabled={busyItemId === item.id} onClick={() => decide(r.id, item.id, 'Keep')}>
+                      Keep
+                    </Button>
+                    <Button size="small" disabled={busyItemId === item.id} onClick={() => decide(r.id, item.id, 'Remove')}>
+                      Remove
+                    </Button>
+                    <Button size="small" disabled={busyItemId === item.id} onClick={() => decide(r.id, item.id, 'Escalated')}>
+                      Escalate
+                    </Button>
+                  </div>
+                )}
               </div>
             ))}
           </Card>

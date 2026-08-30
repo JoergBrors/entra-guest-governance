@@ -67,7 +67,11 @@ public sealed class DisableGuestHandler(IGuestAccountRepository guestRepository,
 /// ausgeführt (siehe MVP-Verification-Prompt Punkt 9).
 /// </summary>
 public sealed class DeleteGuestHandler(
-    IGuestAccountRepository guestRepository, bool allowGuestDelete, ILogger<DeleteGuestHandler> logger)
+    IGuestAccountRepository guestRepository,
+    IAssignmentRepository assignmentRepository,
+    LifecycleService lifecycleService,
+    bool allowGuestDelete,
+    ILogger<DeleteGuestHandler> logger)
     : IJobHandler
 {
     public string JobType => JobTypes.DeleteGuest;
@@ -86,6 +90,26 @@ public sealed class DeleteGuestHandler(
             TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), Guid.Parse(job.EntityId), ct);
         if (guest is null)
         {
+            return;
+        }
+
+        var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
+        var assignments = await assignmentRepository.ListByGuestAsync(tenant, guest.Id, ct);
+        if (assignments.Count > 0)
+        {
+            logger.LogWarning(
+                "DeleteGuest blockiert: Guest {GuestId} hat noch {AssignmentCount} Workload-Zuordnung(en).",
+                guest.Id, assignments.Count);
+            return;
+        }
+
+        var evaluation = await lifecycleService.EvaluateDeletionAsync(
+            job.PlatformTenantId, guest.Id, gracePeriodReached: true, job.CorrelationId, ct);
+        if (evaluation.Result != DeletionGateResult.Ready)
+        {
+            logger.LogWarning(
+                "DeleteGuest blockiert: Deletion Gate fuer Guest {GuestId} ist {Result}; Blockers=[{Blockers}].",
+                guest.Id, evaluation.Result, string.Join(',', evaluation.Blockers));
             return;
         }
 

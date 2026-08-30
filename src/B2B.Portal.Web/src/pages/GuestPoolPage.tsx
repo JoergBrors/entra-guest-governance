@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Title2, Text, Table, TableHeader, TableRow, TableHeaderCell, TableBody, TableCell,
   Badge, Input, Button, Field, Spinner, makeStyles, MessageBar, MessageBarBody,
@@ -146,6 +147,7 @@ export function GuestPoolPage() {
             <TableRow>
               <TableHeaderCell>Anzeigename</TableHeaderCell>
               <TableHeaderCell>E-Mail</TableHeaderCell>
+              <TableHeaderCell>UserType</TableHeaderCell>
               <TableHeaderCell>Status</TableHeaderCell>
               <TableHeaderCell>Workloads</TableHeaderCell>
               <TableHeaderCell>Deletion Gate (Dry Run)</TableHeaderCell>
@@ -154,8 +156,9 @@ export function GuestPoolPage() {
           <TableBody>
             {guests.map((g) => (
               <TableRow key={g.id}>
-                <TableCell>{g.displayName}</TableCell>
+                <TableCell><Link to={`/guest-pool/${g.id}`}>{g.displayName}</Link></TableCell>
                 <TableCell>{g.mail}</TableCell>
+                <TableCell><Badge>{g.userType}</Badge></TableCell>
                 <TableCell>
                   <Badge color={stateColor[g.accountState] ?? 'informative'}>{g.accountState}</Badge>
                 </TableCell>

@@ -16,6 +16,7 @@ public sealed class WorkloadScenario
     public required Guid WorkloadId { get; init; }
     public required string Name { get; set; }
     public List<ScenarioResourceRule> Rules { get; init; } = new();
+    public List<string> ScenarioManagers { get; init; } = new();
     public bool Active { get; set; } = true;
 
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;

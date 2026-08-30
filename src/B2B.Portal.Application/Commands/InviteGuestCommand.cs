@@ -40,7 +40,8 @@ public sealed class InviteGuestCommandHandler(
         await provisioningService.EnqueueJobAsync(
             request.PlatformTenantId, request.DirectoryTenantId, JobTypes.InviteGuest,
             nameof(GuestAccount), guest.Id.ToString(), hash,
-            new { guest.Mail, guest.DisplayName }, correlationId, ct);
+            new { guest.Mail, guest.DisplayName },
+            correlationId, ct, triggeredBy: request.Actor);
 
         await auditService.RecordAsync(
             request.PlatformTenantId, request.Actor, "InviteGuest", nameof(GuestAccount),

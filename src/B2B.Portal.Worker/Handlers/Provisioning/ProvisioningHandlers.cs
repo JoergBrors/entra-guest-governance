@@ -14,6 +14,8 @@ namespace B2B.Portal.Worker.Handlers.Provisioning;
 /// </summary>
 public sealed class GrantWorkloadRoleHandler(
     IAssignmentRepository assignmentRepository,
+    IGuestAccountRepository guestRepository,
+    IWorkloadRepository workloadRepository,
     IResourceConnector connector,
     ILogger<GrantWorkloadRoleHandler> logger) : IJobHandler
 {
@@ -41,12 +43,32 @@ public sealed class GrantWorkloadRoleHandler(
             return;
         }
 
-        // directoryTenantId wird im MVP über den Guest ermittelt (Payload trägt hier nur GuestId).
-        await connector.GrantAccessAsync(
-            directoryTenantId: job.DirectoryTenantId ?? string.Empty,
-            entraObjectId: guestId.ToString(),
-            resourceExternalId: assignment.RoleId.ToString(),
-            ct);
+        var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
+        var guest = await guestRepository.GetAsync(tenant, assignment.GuestId, ct);
+        var workload = await workloadRepository.GetAsync(tenant, assignment.WorkloadId, ct);
+        var role = workload?.Roles.FirstOrDefault(r => r.Id == assignment.RoleId);
+        if (guest?.EntraObjectId is null || workload is null || role is null)
+        {
+            logger.LogWarning(
+                "GrantWorkloadRole: Fakten fehlen für Assignment {AssignmentId} (Guest/EntraObjectId/Workload/Role).",
+                assignmentId);
+            return;
+        }
+
+        foreach (var resourceId in role.ResourceMappings)
+        {
+            var resource = workload.Resources.FirstOrDefault(r => r.Id == resourceId);
+            if (resource?.ExternalId is null)
+            {
+                continue;
+            }
+
+            await connector.GrantAccessAsync(
+                directoryTenantId: guest.DirectoryTenantId,
+                entraObjectId: guest.EntraObjectId,
+                resourceExternalId: resource.ExternalId,
+                ct);
+        }
 
         assignment.Status = AssignmentStatus.Active;
         assignment.UpdatedAt = DateTimeOffset.UtcNow;
@@ -58,6 +80,9 @@ public sealed class GrantWorkloadRoleHandler(
 }
 
 public sealed class RevokeWorkloadRoleHandler(
+    IAssignmentRepository assignmentRepository,
+    IGuestAccountRepository guestRepository,
+    IWorkloadRepository workloadRepository,
     IResourceConnector connector,
     ILogger<RevokeWorkloadRoleHandler> logger) : IJobHandler
 {
@@ -66,15 +91,47 @@ public sealed class RevokeWorkloadRoleHandler(
     public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var assignmentId = Guid.Parse(job.EntityId);
-        var guestId = job.Payload.GetProperty("GuestId").GetGuid();
+        var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
+        var assignment = await assignmentRepository.GetAsync(tenant, assignmentId, ct);
+        var guestId = job.Payload.TryGetProperty("GuestId", out var guestIdValue)
+            ? guestIdValue.GetGuid()
+            : assignment?.GuestId ?? Guid.Empty;
+        if (guestId == Guid.Empty)
+        {
+            logger.LogWarning("RevokeWorkloadRole: GuestId fehlt für {AssignmentId}.", assignmentId);
+            return;
+        }
+        var guest = await guestRepository.GetAsync(tenant, guestId, ct);
+        if (assignment is null || guest?.EntraObjectId is null)
+        {
+            logger.LogWarning("RevokeWorkloadRole: Assignment oder Guest fehlt für {AssignmentId}.", assignmentId);
+            return;
+        }
+
+        var workload = await workloadRepository.GetAsync(tenant, assignment.WorkloadId, ct);
+        var role = workload?.Roles.FirstOrDefault(r => r.Id == assignment.RoleId);
+        if (workload is null || role is null)
+        {
+            logger.LogWarning("RevokeWorkloadRole: Workload oder Rolle fehlt für {AssignmentId}.", assignmentId);
+            return;
+        }
 
         // Entfernt ausschließlich die Member-Referenz des Workload-Zugriffs — die
         // Gastidentität selbst wird hier nie berührt (Anhang A, Regel 3).
-        await connector.RevokeAccessAsync(
-            directoryTenantId: job.DirectoryTenantId ?? string.Empty,
-            entraObjectId: guestId.ToString(),
-            resourceExternalId: assignmentId.ToString(),
-            ct);
+        foreach (var resourceId in role.ResourceMappings)
+        {
+            var resource = workload.Resources.FirstOrDefault(r => r.Id == resourceId);
+            if (resource?.ExternalId is null)
+            {
+                continue;
+            }
+
+            await connector.RevokeAccessAsync(
+                directoryTenantId: guest.DirectoryTenantId,
+                entraObjectId: guest.EntraObjectId,
+                resourceExternalId: resource.ExternalId,
+                ct);
+        }
 
         logger.LogInformation("Assignment {AssignmentId} revoked. CorrelationId={CorrelationId}",
             assignmentId, job.CorrelationId);

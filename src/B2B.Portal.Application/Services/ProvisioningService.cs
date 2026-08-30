@@ -22,7 +22,9 @@ public sealed class ProvisioningService(IJobRepository jobRepository, IJobQueue 
         string desiredStateHash,
         object payload,
         Guid correlationId,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? triggeredBy = null,
+        Guid? workloadId = null)
     {
         var operation = new DirectoryOperation
         {
@@ -31,6 +33,8 @@ public sealed class ProvisioningService(IJobRepository jobRepository, IJobQueue 
             JobType = jobType,
             EntityType = entityType,
             EntityId = entityId,
+            TriggeredBy = triggeredBy,
+            WorkloadId = workloadId,
             CorrelationId = correlationId,
             DesiredStateHash = desiredStateHash,
             Status = JobStatus.Pending,
@@ -43,11 +47,10 @@ public sealed class ProvisioningService(IJobRepository jobRepository, IJobQueue 
         var payloadJson = JsonSerializer.SerializeToElement(payload);
         var envelope = JobEnvelope.Create(
             platformTenantId, directoryTenantId, jobType, entityType, entityId,
-            desiredStateHash, payloadJson, correlationId);
+            desiredStateHash, payloadJson, correlationId, operation.Id);
 
-        // JobEnvelope.JobId und DirectoryOperation.Id sind bewusst getrennt (Envelope ist
-        // der Transport, DirectoryOperation der persistente Audit-/Statusdatensatz);
-        // beide teilen sich CorrelationId für Nachvollziehbarkeit.
+        // JobEnvelope.JobId und DirectoryOperation.Id sind identisch, damit der Worker
+        // denselben persistierten Statusdatensatz fortschreiben kann.
         await jobQueue.EnqueueAsync(envelope, ct);
 
         return operation;

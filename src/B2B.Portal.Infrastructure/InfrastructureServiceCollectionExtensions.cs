@@ -37,6 +37,7 @@ public static class InfrastructureServiceCollectionExtensions
 
         services.AddSingleton<IClock, SystemClock>();
         services.AddSingleton<ISpreadsheetReader, ClosedXmlSpreadsheetReader>();
+        services.AddSingleton<MockEntraDirectoryStore>();
 
         // "cosmos" (Default unter LOCAL_MOCK) nutzt den lokalen Cosmos DB Emulator (siehe
         // scripts/requirements.ps1 -InitCosmosEmulator) oder eine echte Cosmos-DB in
@@ -81,7 +82,8 @@ public static class InfrastructureServiceCollectionExtensions
         }
 
         services.AddSingleton<IGuestDirectory, MockGuestDirectory>();
-        services.AddSingleton<IResourceConnector>(new MockResourceConnector("SecurityGroup"));
+        services.AddSingleton<IResourceConnector>(sp => new MockResourceConnector(
+            "SecurityGroup", sp.GetRequiredService<MockEntraDirectoryStore>()));
 
         if (emailProvider.Equals("graph", StringComparison.OrdinalIgnoreCase))
         {
