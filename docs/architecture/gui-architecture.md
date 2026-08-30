@@ -1,6 +1,6 @@
 # GUI Architecture
 
-Stand: 2026-08-29
+Stand: 2026-08-30
 
 Die Web-GUI liegt in `src/B2B.Portal.Web` und nutzt React, TypeScript, Vite und Fluent UI.
 Die App Shell besteht aus `src/components/AppLayout.tsx`.

@@ -17,6 +17,7 @@ lokal betreibbaren MVP:
 - [Voraussetzungen](#voraussetzungen)
 - [Installation & erster Start](#installation--erster-start)
 - [Drei Development-Modi](#drei-development-modi)
+- [LOCAL_MOCK per Docker Compose](#local_mock-per-docker-compose)
 - [Verwendete Fremdsoftware](#verwendete-fremdsoftware)
 - [Weiterführende Dokumentation](#weiterführende-dokumentation)
 - [Sicherheitshinweise](#sicherheitshinweise)
@@ -128,6 +129,7 @@ Polling-Dispatcher, Lease-basiertem Claim und Retry/Dead-Letter.
 | [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite) (npm-Paket) | lokaler Azure-Storage-Emulator | ✅ |
 | [Azure CLI](https://learn.microsoft.com/cli/azure/) | optional, für spätere Azure-Deployments | ✅ |
 | [Microsoft.Graph PowerShell SDK](https://learn.microsoft.com/powershell/microsoftgraph) | nur für `DEV_INTEGRATION` (Entra-App-Registration automatisiert anlegen) | manuell, siehe unten |
+| [Docker](https://docs.docker.com/get-docker/) + Compose | optional: kompletten `LOCAL_MOCK`-Stack containerisiert starten (siehe unten) | manuell, siehe unten |
 
 Alle Emulatoren/Tools laufen rein lokal — ein frisches Checkout benötigt **keine** Azure-
 Subscription und **keine** echten Entra-Tenant-Zugänge.
@@ -274,6 +276,49 @@ Optional: Spiegelung der `.env.local`-Secrets in einen Azure Key Vault, sobald e
 Beide Skripte laufen standardmäßig im Dry-Run (`-WhatIf`-Charakter) und ändern ohne
 `-Apply` nichts. In der lokalen Entwicklung (`LOCAL_MOCK`) ist keines der beiden Skripte
 erforderlich.
+
+## LOCAL_MOCK per Docker Compose
+
+Alternative zum manuellen Start (Schritt 0/1/2/3 oben): `docker-compose.yml` startet den
+kompletten `LOCAL_MOCK`-Stack containerisiert — Cosmos DB Emulator, API, Worker und Web,
+ohne lokal installiertes .NET SDK/Node.js.
+
+```bash
+docker compose up --build
+```
+
+Dienste:
+
+| Service | Beschreibung |
+| --- | --- |
+| `cosmos` | `azure-cosmos-emulator` (linux/amd64), Ports `8081` + `10250-10255`, persistentes Volume `cosmos-data` |
+| `cosmos-init` | Einmaliger Init-Container (`docker/cosmos-init.ps1`), legt Datenbank `b2b-governance-dev` und Container `domain`/`discovery`/`jobs`/`audit` an, wartet auf gesunden `cosmos`-Healthcheck |
+| `api` | Baut `src/B2B.Portal.Api/Dockerfile`, Port `5000:8080`, Healthcheck auf `/health` |
+| `worker` | Baut `src/B2B.Portal.Worker/Dockerfile`, kein exponierter Port, wartet auf `cosmos-init` |
+| `web` | Baut `src/B2B.Portal.Web/Dockerfile` (Vite-Build → nginx), Port `5301:80`, wartet auf gesunde `api` |
+
+Gemeinsame Umgebung (`x-portal-env`): `B2B_MODE=LOCAL_MOCK`, `DIRECTORY_PROVIDER=mock`,
+`EMAIL_PROVIDER=mock`, `DATA_PROVIDER=cosmos`, `JOB_QUEUE_PROVIDER=cosmos`,
+`ALLOW_GRAPH_WRITES=false`, `ALLOW_GUEST_DELETE=false`, `COSMOS_DATABASE_ID=b2b-governance-dev`,
+`VITE_DEV_PLATFORM_TENANT_ID=dev-tenant-a` — identische Sicherheitsdefaults wie beim
+manuellen `LOCAL_MOCK`-Start (keine echten Graph-/Mail-Schreibzugriffe).
+
+Optionales Seeding über das Compose-Profil `seed` (curl-Container, ruft
+`POST /api/dev/seed/large-workload` mit `X-Platform-Tenant-Id: dev-tenant-a` auf):
+
+```bash
+docker compose --profile seed up seed
+```
+
+Lokalen Cosmos-Emulator-Datenbestand (außerhalb von Docker) zurücksetzen:
+
+```powershell
+./scripts/reset-cosmos-dev-data.ps1
+```
+
+Web UI danach unter <http://localhost:5301>, API unter <http://localhost:5000>. Die
+Docker-Variante ersetzt Schritt 0–3 vollständig, ist aber unabhängig vom lokal per
+`requirements.ps1` eingerichteten Cosmos DB Emulator/Azurite.
 
 ## Verwendete Fremdsoftware
 

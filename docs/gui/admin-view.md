@@ -1,6 +1,6 @@
 # Admin View
 
-Stand: 2026-08-29
+Stand: 2026-08-30
 
 Governance/Admin-Funktionen setzen die Rolle `GovernanceAdmin` voraus.
 
@@ -9,11 +9,14 @@ Admin-Funktionen:
 - Guest Pool lesen
 - Gaeste einladen
 - Guest Import Preview/Commit
-- Workload erstellen
+- Workload erstellen (inkl. Administrative Unit, Application, Gruppen-Namenspatterns)
+- bestehende Mock-Ressource an Workload anhaengen
 - Gast einer Workload-Rolle zuweisen
 - Reviews lesen/entscheiden
 - Audit lesen
 - globale Workload-Liste lesen
+- Jobs lesen und nicht-terminale Jobs stoppen
+- Mock Entra Directory pflegen (Benutzer, Gruppen, Applications, Mitgliedschaften) unter `LOCAL_MOCK`
 
 Workload Owner:
 

@@ -225,9 +225,44 @@ Ergaenzte Tests:
 - Mock Directory enthaelt Benutzer, Gruppen und Memberships.
 - Mock Connector legt Gruppen an und weist Mitglieder zu.
 
+## 11. Erweiterung 2026-08-30: Docker-Compose-Stack, Mock-Entra-Applications, Workload-Patterns, Job-Stop
+
+Ausgefuehrte Checks:
+
+| Check | Ergebnis |
+| --- | --- |
+| `dotnet build -c Debug` | erfolgreich, 0 Warnungen, 0 Fehler |
+| `dotnet test -c Debug` | erfolgreich, 83 Tests bestanden (Domain 29, Architecture 5, Application 3, Integration 46) |
+| `npm run build` | erfolgreich, Vite Build erzeugt `dist` |
+| `npm run test -- --run` | erfolgreich, 5 Tests bestanden |
+
+Ergaenzte Funktionen:
+
+- `docker-compose.yml` + Dockerfiles fuer Api/Worker/Web: containerisierter `LOCAL_MOCK`-Stack (Cosmos Emulator, Cosmos-Init, Api, Worker, Web, optionales Seed-Profil).
+- Mock Entra Directory um Applications/App-Rollen/Application-Sign-Ins erweitert (`MockEntraApplication`, `MockEntraApplicationRole`, `MockEntraApplicationSignIn`).
+- `ApplicationSignInSyncWorker`: periodischer BackgroundService, simuliert Entra-Sign-In-Logs fuer Workloads mit `ApplicationExternalId`.
+- Workload-Modell um `IsDefault`, `AdministrativeUnitExternalId`, `ApplicationExternalId`, `ResourceNamePatterns` erweitert; `SyncWorkloadPatternResourcesHandler` haengt gematchte Mock-Gruppen automatisch als Ressource an.
+- `POST /api/workloads/{workloadId}/resources/attach` fuer manuelles Anhaengen bestehender Ressourcen.
+- `GET/POST/PUT/DELETE /api/dev/mock-entra/applications`, `GET /api/dev/mock-entra/application-signins`, `GET /api/dev/mock-entra/login-users`, `DELETE /api/dev/mock-entra/groups/{groupId}/members`.
+- `GET /api/jobs`, `GET /api/jobs/{id}`, `POST /api/jobs/{id}/stop` — Job-Status-Liste/-Detail und Abbruch nicht-terminaler Jobs; `JobDispatcher` schreibt Live-Status in `IJobRepository`.
+- `GET /api/workloads/{workloadId}/scenarios/{scenarioId}/users` fuer Scenario-User-Ansicht (Guest-/App-Sign-In-Daten).
+- Dev-User-Switcher in der Web-UI (Rollenwechsel ohne Re-Login ueber `localStorage`).
+- Szenario-Import erlaubt keine automatische Ressourcen-Neuanlage mehr — referenzierte Ressourcen muessen bereits am Workload existieren (Fehler statt Silent-Create); Import auf `IsDefault`-Workloads wird blockiert.
+
+Ergaenzte Tests:
+
+- API Smoke: Large-Workload-Seed befuellt Mock-Entra-Benutzer/-Gruppen/-Mitgliedschaften.
+- Mock-Entra-Directory-Tests fuer Applications/Sign-Ins erweitert.
+- Szenario-Deployment-Tests fuer das neue Import-Fehlerverhalten (keine automatische Ressourcen-Anlage) angepasst.
+
+Nicht in dieser Runde verifiziert:
+
+- Live-Start des Docker-Compose-Stacks (`docker compose up --build`) — nur Konfigurationspruefung, kein tatsaechlicher Container-Lauf.
+
 ## Gesamtstatus
 
 **PASS WITH PENDING INTEGRATIONS** — Frontend und Backend bauen und testen vollständig
-grün (43 Integrationstests plus bestehende Domain/Application/Architecture-Tests, 5/5 Frontend-Tests). Offen bleiben ausschließlich die bewusst
+grün (83 Backend-Tests: Domain 29, Architecture 5, Application 3, Integration 46; 5/5 Frontend-Tests). Offen bleiben ausschließlich die bewusst
 nicht simulierten externen Integrationen (echter Graph-Write, echter Mail-Versand,
-Token-Validierung) sowie die in Abschnitt 7/8 genannten funktionalen Lücken.
+Token-Validierung), die in Abschnitt 7/8 genannten funktionalen Lücken sowie der in
+Abschnitt 11 genannte fehlende Live-Verifikationslauf des Docker-Compose-Stacks.

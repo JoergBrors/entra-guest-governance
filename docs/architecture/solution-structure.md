@@ -1,6 +1,6 @@
 # Solution Structure
 
-Stand: 2026-08-29
+Stand: 2026-08-30
 
 Projektstruktur:
 
@@ -12,4 +12,4 @@ Projektstruktur:
 - `src/B2B.Portal.Web`: React/Vite/Fluent UI.
 - `tests`: Domain-, Application-, Architecture- und Integrationstests.
 - `infra`: Bicep.
-
+- `docker-compose.yml`, `src/B2B.Portal.Api/Dockerfile`, `src/B2B.Portal.Worker/Dockerfile`, `src/B2B.Portal.Web/Dockerfile` (+ `nginx.conf`), `docker/`: containerisierter `LOCAL_MOCK`-Stack (siehe `README.md`).
