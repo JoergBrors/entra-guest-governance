@@ -33,6 +33,29 @@ const AUTO_REFRESH_INTERVAL_MS = 5000;
 // Workloads-Admin-Seite) und werden hier nur read-only mit Statistik angezeigt.
 const TRIGGERABLE_JOB_TYPES = new Set(['RunDiscovery', 'RunReconciliation']);
 
+// Erklaert pro Job-Typ, WAS ihn tatsaechlich ausloest — ohne das bleibt in der reinen
+// Zahlen-Uebersicht unklar, ob ein Job automatisch, aus einem UI-Flow oder manuell entsteht.
+// Nur Job-Typen mit einem tatsaechlich existierenden Trigger-Pfad im Code sind hier gelistet
+// (siehe JobTypes in B2B.Portal.Domain/Entities/Job.cs fuer alle 17 Konstanten — die uebrigen
+// haben aktuell KEINEN Ausloeser im Code, siehe Fallback-Text unten).
+const JOB_TYPE_TRIGGER_DESCRIPTIONS: Record<string, string> = {
+  InviteGuest: 'Gäste-Import / "Gast einladen" (Guest Pool, Admin)',
+  ResendInvitation: 'Erneutes Senden einer offenen Einladung (Guest Pool, Admin)',
+  GrantWorkloadRole: '"Gast zuweisen" auf der Workloads-Admin-Seite',
+  RevokeWorkloadRole: '"Unassign" im Guest Pool oder bei Review-Entscheidung "Remove"',
+  DeployScenario: '"Deploy" auf einem Workload-Szenario (Scenarios-Seite)',
+  SyncWorkloadPatternResources: 'Automatisch bei Workload erstellen/bearbeiten, wenn Gruppen-Pattern gesetzt sind',
+  ApplyReviewDecision: 'Review-Entscheidung (Keep/Remove) auf der Reviews-Seite',
+  StartReview: 'Start einer Review-Instanz (turnusmäßig oder aus dem Review-Flow)',
+  ValidateDeletion: 'Deletion-Gate-Prüfung vor Disable/Delete eines Gasts',
+  DisableGuest: 'Governance-Freigabe zum Deaktivieren eines Gasts',
+  DeleteGuest: 'Governance-Freigabe zum endgültigen Löschen eines Gasts (nur mit ALLOW_GUEST_DELETE)',
+  SendNotification: 'Automatisch als Folge-Job anderer Aktionen (z. B. nach Invite/Grant)',
+  RunDiscovery: 'Manuell über "Jetzt ausführen" (unten) oder künftig automatisch/turnusmäßig',
+  RunReconciliation: 'Manuell über "Jetzt ausführen" (unten) oder künftig automatisch/turnusmäßig',
+};
+const NO_TRIGGER_YET = 'Kein Trigger-Pfad im Code vorhanden — dieser Job-Typ kann aktuell nicht entstehen.';
+
 interface JobTypeSummary {
   jobType: string;
   total: number;
@@ -158,7 +181,12 @@ export function WorkerOverviewPage() {
         {summaries.map((summary) => (
           <Card key={summary.jobType} className={styles.card}>
             <div className={styles.row}>
-              <Text weight="semibold">{summary.jobType}</Text>
+              <div>
+                <Text weight="semibold" block>{summary.jobType}</Text>
+                <Text size={200} className={styles.meta}>
+                  {JOB_TYPE_TRIGGER_DESCRIPTIONS[summary.jobType] ?? NO_TRIGGER_YET}
+                </Text>
+              </div>
               <div className={styles.stat}>
                 <Text size={200} className={styles.meta}>Gesamt</Text>
                 <Text className={styles.statCount}>{summary.total}</Text>
@@ -213,7 +241,10 @@ export function WorkerOverviewPage() {
         {[...TRIGGERABLE_JOB_TYPES].filter((t) => !summaries.some((s) => s.jobType === t)).map((jobType) => (
           <Card key={jobType} className={styles.card}>
             <div className={styles.row}>
-              <Text weight="semibold">{jobType}</Text>
+              <div>
+                <Text weight="semibold" block>{jobType}</Text>
+                <Text size={200} className={styles.meta}>{JOB_TYPE_TRIGGER_DESCRIPTIONS[jobType]}</Text>
+              </div>
               <div className={styles.stat}>
                 <Text size={200} className={styles.meta}>Gesamt</Text>
                 <Text className={styles.statCount}>0</Text>

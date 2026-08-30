@@ -508,7 +508,13 @@ public sealed class MockGuestDirectory(MockEntraDirectoryStore store) : IGuestDi
 
     public Task<IReadOnlyList<DirectoryGuestSnapshot>> ListGuestsAsync(string directoryTenantId, CancellationToken ct)
         => Task.FromResult<IReadOnlyList<DirectoryGuestSnapshot>>(
-            [.. store.ListUsers().Select(u => new DirectoryGuestSnapshot(u.ObjectId, u.Mail, u.DisplayName, u.AccountEnabled))]);
+            [.. store.ListUsers()
+                // Discovery bildet den Guest Pool ab — nur externe B2B-Gaeste (UserType
+                // "Guest"), keine internen Mitglieder/Admins (z.B. admin@platform.example,
+                // workload-owner@platform.example), die im Mock-Stamm ebenfalls als
+                // MockEntraUser existieren, aber niemals externe Gaeste sind.
+                .Where(u => string.Equals(u.UserType, "Guest", StringComparison.OrdinalIgnoreCase))
+                .Select(u => new DirectoryGuestSnapshot(u.ObjectId, u.Mail, u.DisplayName, u.AccountEnabled))]);
 
     public Task<IReadOnlyList<DirectoryGroupMembership>> ListMembershipsAsync(
         string directoryTenantId, string entraObjectId, CancellationToken ct)
