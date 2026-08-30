@@ -7,6 +7,20 @@ import { api } from '../api/client';
 import type { JobStatusResponse } from '../types/domain';
 
 const useStyles = makeStyles({
+  summary: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+    gap: '12px',
+    marginTop: '16px',
+  },
+  summaryCard: {
+    padding: '12px 16px',
+    borderRadius: 'var(--card-radius)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  summaryCount: { fontSize: tokens.fontSizeHero700 },
   list: { display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '16px' },
   card: { padding: '16px 20px', borderRadius: 'var(--card-radius)' },
   row: {
@@ -44,6 +58,8 @@ const useStyles = makeStyles({
   },
 });
 
+const AUTO_REFRESH_INTERVAL_MS = 5000;
+
 export function JobsPage() {
   const styles = useStyles();
   const [jobs, setJobs] = useState<JobStatusResponse[] | null>(null);
@@ -56,7 +72,14 @@ export function JobsPage() {
       .catch((e: Error) => setError(e.message));
   };
 
-  useEffect(reload, []);
+  // Automatische Aktualisierung statt reinem manuellem Reload: die Uebersicht dient auch als
+  // Worker-Statusanzeige (laufen gerade Jobs, wie viele haengen fest) — ohne Polling wuerde
+  // "wird gerade verarbeitet" sofort veralten, sobald der Worker den naechsten Job zieht.
+  useEffect(() => {
+    reload();
+    const interval = setInterval(reload, AUTO_REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, []);
 
   const stopJob = async (jobId: string) => {
     setError(null);
@@ -73,10 +96,40 @@ export function JobsPage() {
     return <Spinner label="Lade Jobs..." />;
   }
 
+  const runningCount = jobs.filter((j) => j.status === 'Running').length;
+  const pendingCount = jobs.filter((j) => j.status === 'Pending').length;
+  const failedCount = jobs.filter((j) => j.status === 'Failed' || j.status === 'DeadLetter').length;
+  const lastActivity = jobs.reduce<string | null>(
+    (latest, job) => (!latest || job.updatedAt > latest ? job.updatedAt : latest), null);
+  // Kein separater "Worker läuft/gestoppt"-Status: die API hat kein Prozess-Handle auf den
+  // Worker (eigenstaendiger .NET-Host-Prozess, siehe launch.json/docker-compose.yml) — ob der
+  // Worker aktiv ist, zeigt sich indirekt daran, ob Pending/Running-Jobs zeitnah fortschreiten.
+
   return (
     <div>
       <Title2>Jobs</Title2>
       <Text>Worker-Jobs im erlaubten Kontext: Governance Admin sieht alle Jobs, Workload Owner nur Jobs ihrer Workloads.</Text>
+
+      <div className={styles.summary}>
+        <Card className={styles.summaryCard}>
+          <Text size={200}>Laufend</Text>
+          <Text className={styles.summaryCount} weight="semibold">{runningCount}</Text>
+        </Card>
+        <Card className={styles.summaryCard}>
+          <Text size={200}>Wartend</Text>
+          <Text className={styles.summaryCount} weight="semibold">{pendingCount}</Text>
+        </Card>
+        <Card className={styles.summaryCard}>
+          <Text size={200}>Fehlgeschlagen</Text>
+          <Text className={styles.summaryCount} weight="semibold" style={failedCount > 0 ? { color: tokens.colorPaletteRedForeground1 } : undefined}>
+            {failedCount}
+          </Text>
+        </Card>
+        <Card className={styles.summaryCard}>
+          <Text size={200}>Letzte Aktivität</Text>
+          <Text weight="semibold">{lastActivity ? new Date(lastActivity).toLocaleTimeString() : '—'}</Text>
+        </Card>
+      </div>
 
       {error && (
         <MessageBar intent="error" style={{ marginTop: 12 }}>
