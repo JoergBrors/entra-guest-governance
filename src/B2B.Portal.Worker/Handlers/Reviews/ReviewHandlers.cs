@@ -59,7 +59,8 @@ public sealed class StartReviewHandler(
 /// </summary>
 public sealed class ApplyReviewDecisionHandler(
     IReviewRepository reviewRepository,
-    IJobQueue jobQueue,
+    IAssignmentRepository assignmentRepository,
+    B2B.Portal.Application.Services.ProvisioningService provisioningService,
     B2B.Portal.Application.Services.AuditService auditService,
     ILogger<ApplyReviewDecisionHandler> logger) : IJobHandler
 {
@@ -89,12 +90,22 @@ public sealed class ApplyReviewDecisionHandler(
 
         if (decision == ReviewDecision.Remove)
         {
-            var payload = System.Text.Json.JsonSerializer.SerializeToElement(new { });
-            var revokeJob = JobEnvelope.Create(
+            var assignment = await assignmentRepository.GetAsync(
+                TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), item.AssignmentId, ct);
+            await provisioningService.EnqueueJobAsync(
                 job.PlatformTenantId, job.DirectoryTenantId, JobTypes.RevokeWorkloadRole,
                 nameof(GuestWorkloadAssignment), item.AssignmentId.ToString(),
-                desiredStateHash: $"revoke-{item.AssignmentId}", payload, job.CorrelationId);
-            await jobQueue.EnqueueAsync(revokeJob, ct);
+                desiredStateHash: $"revoke-{item.AssignmentId}",
+                new
+                {
+                    GuestId = assignment?.GuestId ?? Guid.Empty,
+                    WorkloadId = assignment?.WorkloadId ?? Guid.Empty,
+                    RoleId = assignment?.RoleId ?? Guid.Empty,
+                },
+                job.CorrelationId,
+                ct,
+                triggeredBy: item.DecidedBy,
+                workloadId: assignment?.WorkloadId);
         }
 
         await auditService.RecordAsync(

@@ -33,6 +33,9 @@ const sampleWorkload: Workload = {
   owner: 'owner@contoso.example',
   templateId: null,
   active: true,
+  isDefault: false,
+  administrativeUnitExternalId: null,
+  resourceNamePatterns: [],
   roles: [{ id: 'role-1', workloadId: 'wl-1', name: 'Reader', resourceMappings: [] }],
   resources: [{ id: 'res-1', workloadId: 'wl-1', resourceType: 'SecurityGroup', externalId: 'SG-SAP-READER', managed: true }],
 };

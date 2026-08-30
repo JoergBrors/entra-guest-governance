@@ -69,16 +69,24 @@ internal sealed class WorkloadRoleDocument
     [JsonPropertyName("id")] public required Guid Id { get; init; }
     [JsonPropertyName("workloadId")] public required Guid WorkloadId { get; init; }
     [JsonPropertyName("name")] public required string Name { get; init; }
+    [JsonPropertyName("applicationId")] public string? ApplicationId { get; init; }
+    [JsonPropertyName("applicationRoleId")] public string? ApplicationRoleId { get; init; }
     [JsonPropertyName("resourceMappings")] public required List<Guid> ResourceMappings { get; init; }
 
     public static WorkloadRoleDocument FromEntity(WorkloadRole r) => new()
     {
-        Id = r.Id, WorkloadId = r.WorkloadId, Name = r.Name, ResourceMappings = r.ResourceMappings,
+        Id = r.Id, WorkloadId = r.WorkloadId, Name = r.Name,
+        ApplicationId = r.ApplicationId,
+        ApplicationRoleId = r.ApplicationRoleId,
+        ResourceMappings = r.ResourceMappings,
     };
 
     public WorkloadRole ToEntity() => new()
     {
-        Id = Id, WorkloadId = WorkloadId, Name = Name, ResourceMappings = [.. ResourceMappings],
+        Id = Id, WorkloadId = WorkloadId, Name = Name,
+        ApplicationId = ApplicationId,
+        ApplicationRoleId = ApplicationRoleId,
+        ResourceMappings = [.. ResourceMappings],
     };
 }
 
@@ -124,6 +132,18 @@ internal sealed class WorkloadDocument
     [JsonPropertyName("active")]
     public required bool Active { get; init; }
 
+    [JsonPropertyName("isDefault")]
+    public bool IsDefault { get; init; }
+
+    [JsonPropertyName("administrativeUnitExternalId")]
+    public string? AdministrativeUnitExternalId { get; init; }
+
+    [JsonPropertyName("applicationExternalId")]
+    public string? ApplicationExternalId { get; init; }
+
+    [JsonPropertyName("resourceNamePatterns")]
+    public List<string>? ResourceNamePatterns { get; init; }
+
     [JsonPropertyName("roles")]
     public required List<WorkloadRoleDocument> Roles { get; init; }
 
@@ -144,6 +164,10 @@ internal sealed class WorkloadDocument
         Owner = w.Owner,
         TemplateId = w.TemplateId,
         Active = w.Active,
+        IsDefault = w.IsDefault,
+        AdministrativeUnitExternalId = w.AdministrativeUnitExternalId,
+        ApplicationExternalId = w.ApplicationExternalId,
+        ResourceNamePatterns = w.ResourceNamePatterns,
         Roles = [.. w.Roles.Select(WorkloadRoleDocument.FromEntity)],
         Resources = [.. w.Resources.Select(WorkloadResourceDocument.FromEntity)],
         CreatedAt = w.CreatedAt,
@@ -160,9 +184,13 @@ internal sealed class WorkloadDocument
             Owner = Owner,
             TemplateId = TemplateId,
             Active = Active,
+            IsDefault = IsDefault,
+            AdministrativeUnitExternalId = AdministrativeUnitExternalId,
+            ApplicationExternalId = ApplicationExternalId,
             CreatedAt = CreatedAt,
             UpdatedAt = UpdatedAt,
         };
+        workload.ResourceNamePatterns.AddRange(ResourceNamePatterns ?? []);
         workload.Roles.AddRange(Roles.Select(r => r.ToEntity()));
         workload.Resources.AddRange(Resources.Select(r => r.ToEntity()));
         return workload;

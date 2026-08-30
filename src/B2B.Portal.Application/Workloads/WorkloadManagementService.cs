@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using B2B.Portal.Application.Ports;
 using B2B.Portal.Application.Services;
 using B2B.Portal.Domain.Entities;
@@ -24,7 +25,10 @@ public sealed class WorkloadManagementService(
     AuditService auditService)
 {
     public async Task<Workload> CreateWorkloadAsync(
-        TenantContext tenant, string name, string? owner, string? templateId, string actor, CancellationToken ct)
+        TenantContext tenant, string name, string? owner, string? templateId,
+        bool isDefault, string? administrativeUnitExternalId, string? applicationExternalId,
+        List<string> resourceNamePatterns,
+        string actor, CancellationToken ct)
     {
         var workload = new Workload
         {
@@ -32,7 +36,11 @@ public sealed class WorkloadManagementService(
             Name = name,
             Owner = owner,
             TemplateId = templateId,
+            IsDefault = isDefault,
+            AdministrativeUnitExternalId = administrativeUnitExternalId,
+            ApplicationExternalId = applicationExternalId,
         };
+        workload.ResourceNamePatterns.AddRange(ValidateResourceNamePatterns(resourceNamePatterns));
 
         await workloadRepository.UpsertAsync(workload, ct);
 
@@ -44,13 +52,20 @@ public sealed class WorkloadManagementService(
     }
 
     public async Task<Workload> UpdateWorkloadAsync(
-        TenantContext tenant, Guid workloadId, string name, string? owner, string actor, CancellationToken ct)
+        TenantContext tenant, Guid workloadId, string name, string? owner,
+        string? administrativeUnitExternalId, string? applicationExternalId,
+        List<string> resourceNamePatterns,
+        string actor, CancellationToken ct)
     {
         var workload = await workloadRepository.GetAsync(tenant, workloadId, ct)
             ?? throw new InvalidOperationException($"Workload {workloadId} nicht gefunden.");
 
         workload.Name = name;
         workload.Owner = owner;
+        workload.AdministrativeUnitExternalId = administrativeUnitExternalId;
+        workload.ApplicationExternalId = applicationExternalId;
+        workload.ResourceNamePatterns.Clear();
+        workload.ResourceNamePatterns.AddRange(ValidateResourceNamePatterns(resourceNamePatterns));
         workload.UpdatedAt = DateTimeOffset.UtcNow;
         await workloadRepository.UpsertAsync(workload, ct);
 
@@ -146,7 +161,8 @@ public sealed class WorkloadManagementService(
 
     public async Task<WorkloadRole> UpsertRoleAsync(
         TenantContext tenant, Guid workloadId, Guid? roleId, string name,
-        List<Guid> resourceMappings, string actor, CancellationToken ct)
+        string? applicationId, string? applicationRoleId, List<Guid> resourceMappings,
+        string actor, CancellationToken ct)
     {
         var workload = await workloadRepository.GetAsync(tenant, workloadId, ct)
             ?? throw new InvalidOperationException($"Workload {workloadId} nicht gefunden.");
@@ -159,16 +175,38 @@ public sealed class WorkloadManagementService(
                 $"ResourceMappings verweisen auf unbekannte Ressourcen: {string.Join(", ", unknownMappings)}.");
         }
 
+        var hasGroupMapping = workload.Resources
+            .Where(r => resourceMappings.Contains(r.Id))
+            .Any(r => IsGroupResourceType(r.ResourceType));
+        if (!string.IsNullOrWhiteSpace(workload.ApplicationExternalId)
+            && !hasGroupMapping
+            && (string.IsNullOrWhiteSpace(applicationId) || string.IsNullOrWhiteSpace(applicationRoleId)))
+        {
+            throw new InvalidOperationException(
+                "Dieser Workload ist einer Application zugeordnet. Eine Rolle braucht dann entweder eine Gruppen-Zuweisung oder eine Application mit App-Rolle.");
+        }
+        if (!string.IsNullOrWhiteSpace(workload.ApplicationExternalId)
+            && !hasGroupMapping
+            && !string.Equals(workload.ApplicationExternalId, applicationId, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Die Rolle muss die dem Workload zugeordnete Application '{workload.ApplicationExternalId}' verwenden.");
+        }
+
         var role = roleId is null ? null : workload.Roles.FirstOrDefault(r => r.Id == roleId);
         if (role is null)
         {
             role = new WorkloadRole { WorkloadId = workload.Id, Name = name };
+            role.ApplicationId = applicationId;
+            role.ApplicationRoleId = applicationRoleId;
             role.ResourceMappings.AddRange(resourceMappings);
             workload.Roles.Add(role);
         }
         else
         {
             role.Name = name;
+            role.ApplicationId = hasGroupMapping ? null : applicationId;
+            role.ApplicationRoleId = hasGroupMapping ? null : applicationRoleId;
             role.ResourceMappings.Clear();
             role.ResourceMappings.AddRange(resourceMappings);
         }
@@ -240,6 +278,39 @@ public sealed class WorkloadManagementService(
         return resource;
     }
 
+    public async Task<WorkloadResource> AttachResourceAsync(
+        TenantContext tenant, Guid workloadId, string resourceType, string externalId, string actor, CancellationToken ct)
+    {
+        var workload = await workloadRepository.GetAsync(tenant, workloadId, ct)
+            ?? throw new InvalidOperationException($"Workload {workloadId} nicht gefunden.");
+
+        if (workload.Resources.Any(r =>
+            string.Equals(r.ResourceType, resourceType, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(r.ExternalId, externalId, StringComparison.OrdinalIgnoreCase)))
+        {
+            return workload.Resources.First(r =>
+                string.Equals(r.ResourceType, resourceType, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(r.ExternalId, externalId, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var resource = new WorkloadResource
+        {
+            WorkloadId = workload.Id,
+            ResourceType = resourceType,
+            ExternalId = externalId,
+            Managed = false,
+        };
+        workload.Resources.Add(resource);
+        workload.UpdatedAt = DateTimeOffset.UtcNow;
+        await workloadRepository.UpsertAsync(workload, ct);
+
+        await auditService.RecordAsync(
+            tenant.PlatformTenantId, actor, "AttachWorkloadResource", nameof(WorkloadResource),
+            resource.Id.ToString(), "Accepted", Guid.NewGuid(), ct: ct);
+
+        return resource;
+    }
+
     /// <summary>Blockiert, wenn eine WorkloadRole.ResourceMappings oder ein
     /// ScenarioResourceRule.ResourceId noch auf die Ressource zeigt (Datenkonsistenz) —
     /// beide müssten sonst zuerst entkoppelt/gelöscht werden.</summary>
@@ -277,4 +348,55 @@ public sealed class WorkloadManagementService(
             tenant.PlatformTenantId, actor, "DeleteWorkloadResource", nameof(WorkloadResource),
             resourceId.ToString(), "Accepted", Guid.NewGuid(), ct: ct);
     }
+
+    private static List<string> ValidateResourceNamePatterns(List<string>? patterns)
+    {
+        var result = new List<string>();
+        foreach (var pattern in patterns ?? [])
+        {
+            var value = pattern.Trim();
+            if (value.Length == 0)
+            {
+                continue;
+            }
+            if (IsRegexPattern(value))
+            {
+                try
+                {
+                    _ = new Regex(ToRegexExpression(value), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                }
+                catch (ArgumentException ex)
+                {
+                    throw new InvalidOperationException($"Regex-Pattern '{value}' ist ungültig: {ex.Message}");
+                }
+            }
+            else if (value.Any(c => !(char.IsLetterOrDigit(c) || c is '*' or '?' or '-' or '_' or ' ')))
+            {
+                throw new InvalidOperationException(
+                    $"Pattern '{value}' ist ungültig. Erlaubt sind Wildcards mit Buchstaben, Zahlen, Leerzeichen, '-', '_', '*' und '?' oder Regex als 'regex:<ausdruck>' bzw. '/<ausdruck>/'.");
+            }
+            result.Add(value);
+        }
+        return result;
+    }
+
+    private static bool IsRegexPattern(string value) =>
+        value.StartsWith("regex:", StringComparison.OrdinalIgnoreCase)
+        || (value.Length >= 2 && value.StartsWith('/') && value.EndsWith('/'));
+
+    private static string ToRegexExpression(string value)
+    {
+        if (value.StartsWith("regex:", StringComparison.OrdinalIgnoreCase))
+        {
+            return value["regex:".Length..];
+        }
+        return value.Length >= 2 && value.StartsWith('/') && value.EndsWith('/')
+            ? value[1..^1]
+            : value;
+    }
+
+    private static bool IsGroupResourceType(string resourceType) =>
+        resourceType.Equals("SecurityGroup", StringComparison.OrdinalIgnoreCase)
+        || resourceType.Equals("M365Group", StringComparison.OrdinalIgnoreCase)
+        || resourceType.Equals("Team", StringComparison.OrdinalIgnoreCase);
 }

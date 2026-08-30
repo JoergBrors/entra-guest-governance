@@ -45,7 +45,8 @@ public enum JobStatus
     Success,
     Retry,
     Failed,
-    DeadLetter
+    DeadLetter,
+    Cancelled
 }
 
 /// <summary>Klassifizierung eines entdeckten ResourceAccess (Blueprint 12.2).</summary>

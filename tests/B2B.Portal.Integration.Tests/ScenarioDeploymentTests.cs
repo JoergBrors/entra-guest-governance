@@ -148,7 +148,7 @@ public class ScenarioDeploymentTests
     }
 
     [Fact]
-    public async Task ImportTemplate_ThenDeploy_AutoCreatesResourceAndDeploysOnlyMatchingRule()
+    public async Task ImportTemplate_ThenDeploy_UsesWorkloadResourcesAndDeploysOnlyMatchingRule()
     {
         var tenant = TenantContext.Create("scenario-e2e-tenant-import");
         var workloadRepo = new InMemoryWorkloadRepository();
@@ -160,8 +160,21 @@ public class ScenarioDeploymentTests
         var provisioningService = new ProvisioningService(jobRepo, queue, clock);
         var importExportService = new ScenarioImportExportService(workloadRepo, scenarioRepo, auditService);
 
-        // Workload existiert bereits, aber ohne die im Template referenzierten Ressourcen.
         var workload = new Workload { PlatformTenantId = tenant.PlatformTenantId, Name = "SAP-Rollout" };
+        workload.Resources.Add(new WorkloadResource
+        {
+            WorkloadId = workload.Id,
+            ResourceType = "SecurityGroup",
+            ExternalId = "SG-FABRIKAM-DISPONENT",
+            Managed = false,
+        });
+        workload.Resources.Add(new WorkloadResource
+        {
+            WorkloadId = workload.Id,
+            ResourceType = "SecurityGroup",
+            ExternalId = "SG-FABRIKAM-READER",
+            Managed = false,
+        });
         await workloadRepo.UpsertAsync(workload, CancellationToken.None);
 
         var template = new ScenarioTemplateDto(
@@ -184,7 +197,7 @@ public class ScenarioDeploymentTests
         var importResult = await importExportService.ImportAsync(tenant, template, CancellationToken.None);
 
         Assert.Empty(importResult.Errors);
-        Assert.Equal(2, importResult.CreatedResourceNames.Count);
+        Assert.Empty(importResult.CreatedResourceNames);
         Assert.NotNull(importResult.ScenarioId);
 
         var commandHandler = new DeployScenarioCommandHandler(scenarioRepo, provisioningService, auditService);
@@ -219,9 +232,11 @@ public class ScenarioDeploymentTests
         // Ressource, die zusaetzlich von einer WorkloadRole referenziert wird -> darf beim
         // Szenario-Loeschen NICHT entfernt werden.
         var sharedResource = new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "SG-SHARED" };
+        var orphanResource = new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "SG-ORPHAN-ONLY" };
         var role = new WorkloadRole { WorkloadId = workload.Id, Name = "Reader" };
         role.ResourceMappings.Add(sharedResource.Id);
         workload.Resources.Add(sharedResource);
+        workload.Resources.Add(orphanResource);
         workload.Roles.Add(role);
         await workloadRepo.UpsertAsync(workload, CancellationToken.None);
 

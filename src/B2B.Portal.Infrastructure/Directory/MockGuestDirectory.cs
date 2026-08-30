@@ -1,4 +1,5 @@
 using B2B.Portal.Application.Ports;
+using B2B.Portal.Domain.Entities;
 
 namespace B2B.Portal.Infrastructure.Directory;
 
@@ -14,42 +15,76 @@ public sealed record MockEntraUser(
     string JobTitle,
     string Sponsor,
     string AccountEnabled,
-    string UserType);
+    string UserType,
+    IReadOnlyList<string> PortalRoles,
+    DateTimeOffset? LastLoginAt = null);
 
 public sealed record MockEntraGroup(
     string ObjectId,
     string DisplayName,
     string MailNickname,
     string Description,
-    string GroupType,
+    IReadOnlyList<string> GroupTypes,
+    bool MailEnabled,
     bool SecurityEnabled,
-    string? WorkloadName);
+    IReadOnlyList<string> ResourceProvisioningOptions);
+
+public sealed record MockEntraApplicationRole(string Id, string Value, string DisplayName, string Description);
+
+public sealed record MockEntraApplication(
+    string ObjectId,
+    string AppId,
+    string DisplayName,
+    IReadOnlyList<MockEntraApplicationRole> AppRoles);
+
+public sealed record MockEntraApplicationSignIn(
+    string Id,
+    string AppId,
+    string EntraObjectId,
+    DateTimeOffset LastLoginAt);
 
 public sealed class MockEntraDirectoryStore
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, MockEntraUser> _users = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, MockEntraGroup> _groups = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, MockEntraApplication> _applications = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, MockEntraApplicationSignIn> _applicationSignIns = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HashSet<string>> _membersByGroupId = new(StringComparer.OrdinalIgnoreCase);
 
     public MockEntraDirectoryStore()
     {
         SeedUser(new("mock-obj-anna", "anna_contoso.example#EXT#@platform.example", "anna@contoso.example",
             "Anna Contoso", "Anna", "Contoso", "Contoso Consulting", "Logistics",
-            "External Consultant", "sponsor.mueller@platform.example", "true", "Guest"));
+            "External Consultant", "sponsor.mueller@platform.example", "true", "Guest", ["User"]));
         SeedUser(new("mock-obj-peter", "peter_fabrikam.example#EXT#@platform.example", "peter@fabrikam.example",
             "Peter Fabrikam", "Peter", "Fabrikam", "Fabrikam Logistics", "Operations",
-            "Supplier Manager", "sponsor.schmidt@platform.example", "true", "Guest"));
+            "Supplier Manager", "sponsor.schmidt@platform.example", "true", "Guest", ["User"]));
         SeedUser(new("mock-obj-lea", "lea_northwind.example#EXT#@platform.example", "lea@northwind.example",
             "Lea Northwind", "Lea", "Northwind", "Northwind Partners", "Finance",
-            "Project Auditor", "sponsor.becker@platform.example", "true", "Guest"));
+            "Project Auditor", "sponsor.becker@platform.example", "true", "Guest", ["User", "Reviewer"]));
+        SeedUser(new("mock-member-admin", "admin@platform.example", "admin@platform.example",
+            "Platform Admin", "Platform", "Admin", "Platform", "IT",
+            "Governance Administrator", "configuration required", "true", "Member", ["GovernanceAdmin", "User", "Reviewer"]));
+        SeedUser(new("mock-member-owner", "workload-owner@platform.example", "workload-owner@platform.example",
+            "Workload Owner", "Workload", "Owner", "Platform", "Business",
+            "Workload Owner", "configuration required", "true", "Member", ["WorkloadOwner", "User"]));
 
-        SeedGroup(new("mock-grp-reader", "SG-DEMO-READER", "sg-demo-reader",
-            "Mock security group for reader access.", "SecurityGroup", true, "Demo Workload"));
-        SeedGroup(new("mock-grp-contributor", "SG-DEMO-CONTRIBUTOR", "sg-demo-contributor",
-            "Mock security group for contributor access.", "SecurityGroup", true, "Demo Workload"));
-        SeedGroup(new("mock-m365-collab", "M365-DEMO-COLLAB", "m365-demo-collab",
-            "Mock Microsoft 365 collaboration group.", "M365Group", false, "Demo Workload"));
+        SeedGroup(BuildGroup("mock-grp-reader", "SG-DEMO-READER", "SecurityGroup",
+            "Mock security group for reader access."));
+        SeedGroup(BuildGroup("mock-grp-contributor", "SG-DEMO-CONTRIBUTOR", "SecurityGroup",
+            "Mock security group for contributor access."));
+        SeedGroup(BuildGroup("mock-m365-collab", "M365-DEMO-COLLAB", "M365Group",
+            "Mock Microsoft 365 collaboration group."));
+        SeedApplication(new(
+            "mock-app-meridian",
+            "app-meridian-governance",
+            "Meridian Governance App",
+            [
+                new("app-role-reader", "Reader", "Reader", "Read access in the Meridian app."),
+                new("app-role-contributor", "Contributor", "Contributor", "Write access in the Meridian app."),
+                new("app-role-admin", "ProjectAdmin", "Project Admin", "Administrative access in the Meridian app."),
+            ]));
 
         AddMember("mock-grp-reader", "mock-obj-anna");
         AddMember("mock-grp-reader", "mock-obj-peter");
@@ -65,6 +100,11 @@ public sealed class MockEntraDirectoryStore
     public IReadOnlyList<MockEntraGroup> ListGroups()
     {
         lock (_gate) return [.. _groups.Values.OrderBy(g => g.DisplayName)];
+    }
+
+    public IReadOnlyList<MockEntraApplication> ListApplications()
+    {
+        lock (_gate) return [.. _applications.Values.OrderBy(a => a.DisplayName)];
     }
 
     public IReadOnlyList<DirectoryGroupMembership> ListAllMemberships()
@@ -89,6 +129,155 @@ public sealed class MockEntraDirectoryStore
         }
     }
 
+    public MockEntraUser UpsertUser(MockEntraUser user)
+    {
+        lock (_gate)
+        {
+            var objectId = string.IsNullOrWhiteSpace(user.ObjectId)
+                ? $"mock-obj-{Guid.NewGuid():N}"[..20]
+                : user.ObjectId;
+            var existingRoles = _users.TryGetValue(objectId, out var existing)
+                ? existing.PortalRoles
+                : Array.Empty<string>();
+            var preserveExistingRoles = existingRoles.Count > 0
+                && user.PortalRoles.Count == 1
+                && user.PortalRoles.Contains("User", StringComparer.OrdinalIgnoreCase);
+            var normalized = user with
+            {
+                ObjectId = objectId,
+                UserPrincipalName = string.IsNullOrWhiteSpace(user.UserPrincipalName)
+                    ? $"{user.Mail.Replace("@", "_", StringComparison.OrdinalIgnoreCase)}#EXT#@platform.example"
+                    : user.UserPrincipalName,
+                AccountEnabled = string.IsNullOrWhiteSpace(user.AccountEnabled) ? "true" : user.AccountEnabled,
+            UserType = string.IsNullOrWhiteSpace(user.UserType) ? "Guest" : user.UserType,
+            PortalRoles = preserveExistingRoles ? existingRoles : user.PortalRoles.Count == 0 ? ["User"] : user.PortalRoles,
+            LastLoginAt = user.LastLoginAt ?? existing?.LastLoginAt,
+        };
+            SeedUser(normalized);
+            return normalized;
+        }
+    }
+
+    public bool DeleteUser(string objectId)
+    {
+        lock (_gate)
+        {
+            if (!_users.Remove(objectId))
+            {
+                return false;
+            }
+            foreach (var members in _membersByGroupId.Values)
+            {
+                members.Remove(objectId);
+            }
+            return true;
+        }
+    }
+
+    public MockEntraGroup UpsertGroup(MockEntraGroup group)
+    {
+        lock (_gate)
+        {
+            var objectId = string.IsNullOrWhiteSpace(group.ObjectId)
+                ? $"mock-grp-{Guid.NewGuid():N}"[..24]
+                : group.ObjectId;
+            var normalized = group with
+            {
+                ObjectId = objectId,
+                MailNickname = string.IsNullOrWhiteSpace(group.MailNickname)
+                    ? ToMailNickname(group.DisplayName)
+                    : group.MailNickname,
+                GroupTypes = group.GroupTypes ?? [],
+                ResourceProvisioningOptions = group.ResourceProvisioningOptions ?? [],
+            };
+            SeedGroup(normalized);
+            return normalized;
+        }
+    }
+
+    public bool DeleteGroup(string objectId)
+    {
+        lock (_gate)
+        {
+            _membersByGroupId.Remove(objectId);
+            return _groups.Remove(objectId);
+        }
+    }
+
+    public MockEntraApplication UpsertApplication(MockEntraApplication application)
+    {
+        lock (_gate)
+        {
+            var objectId = string.IsNullOrWhiteSpace(application.ObjectId)
+                ? $"mock-app-{Guid.NewGuid():N}"[..24]
+                : application.ObjectId;
+            var normalized = application with
+            {
+                ObjectId = objectId,
+                AppId = string.IsNullOrWhiteSpace(application.AppId)
+                    ? $"app-{Guid.NewGuid():N}"
+                    : application.AppId,
+                AppRoles = application.AppRoles ?? [],
+            };
+            SeedApplication(normalized);
+            return normalized;
+        }
+    }
+
+    public bool DeleteApplication(string objectId)
+    {
+        lock (_gate) return _applications.Remove(objectId);
+    }
+
+    public IReadOnlyList<MockEntraApplicationSignIn> ListApplicationSignIns(string? appId = null)
+    {
+        lock (_gate)
+        {
+            var query = _applicationSignIns.Values.AsEnumerable();
+            if (!string.IsNullOrWhiteSpace(appId))
+            {
+                query = query.Where(s => string.Equals(s.AppId, appId, StringComparison.OrdinalIgnoreCase));
+            }
+            return [.. query.OrderByDescending(s => s.LastLoginAt)];
+        }
+    }
+
+    public MockEntraApplicationSignIn UpsertApplicationSignIn(string appId, string entraObjectId, DateTimeOffset lastLoginAt)
+    {
+        lock (_gate)
+        {
+            var id = $"{appId}:{entraObjectId}";
+            var signIn = new MockEntraApplicationSignIn(id, appId, entraObjectId, lastLoginAt);
+            _applicationSignIns[id] = signIn;
+            return signIn;
+        }
+    }
+
+    public void UpsertGuestAccount(GuestAccount guest)
+    {
+        if (string.IsNullOrWhiteSpace(guest.EntraObjectId))
+        {
+            return;
+        }
+
+        var parts = guest.DisplayName.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        UpsertUser(new(
+            guest.EntraObjectId,
+            $"{guest.Mail.Replace("@", "_", StringComparison.OrdinalIgnoreCase)}#EXT#@platform.example",
+            guest.Mail,
+            guest.DisplayName,
+            parts.FirstOrDefault() ?? guest.DisplayName,
+            parts.Skip(1).FirstOrDefault() ?? string.Empty,
+            "configuration required",
+            "configuration required",
+            "Guest",
+            guest.Sponsor ?? "configuration required",
+            "true",
+            guest.UserType,
+            guest.UserType.Equals("Member", StringComparison.OrdinalIgnoreCase) ? ["User"] : ["User"],
+            DateTimeOffset.UtcNow.AddDays(-Math.Abs(guest.Id.GetHashCode() % 45))));
+    }
+
     public string UpsertInvitedGuest(string mail, string displayName)
     {
         lock (_gate)
@@ -98,7 +287,7 @@ public sealed class MockEntraDirectoryStore
 
             var objectId = $"mock-obj-{Guid.NewGuid():N}"[..20];
             var parts = displayName.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            SeedUser(new(
+            var user = UpsertUser(new(
                 objectId,
                 $"{mail.Replace("@", "_", StringComparison.OrdinalIgnoreCase)}#EXT#@platform.example",
                 mail,
@@ -110,8 +299,9 @@ public sealed class MockEntraDirectoryStore
                 "Guest",
                 "configuration required",
                 "true",
-                "Guest"));
-            return objectId;
+                "Guest",
+                ["User"]));
+            return user.ObjectId;
         }
     }
 
@@ -123,14 +313,11 @@ public sealed class MockEntraDirectoryStore
             if (existing is not null) return existing.ObjectId;
 
             var objectId = $"mock-grp-{Guid.NewGuid():N}"[..24];
-            SeedGroup(new(
+            SeedGroup(BuildGroup(
                 objectId,
                 namePattern,
-                ToMailNickname(namePattern),
-                metadata.TryGetValue("ScenarioId", out var scenarioId) ? $"Scenario {scenarioId}" : "Created by LOCAL_MOCK worker.",
                 resourceType,
-                resourceType.Equals("SecurityGroup", StringComparison.OrdinalIgnoreCase),
-                metadata.TryGetValue("WorkloadName", out var workloadName) ? workloadName : null));
+                metadata.TryGetValue("ScenarioId", out var scenarioId) ? $"Scenario {scenarioId}" : "Created by LOCAL_MOCK worker."));
             return objectId;
         }
     }
@@ -139,14 +326,11 @@ public sealed class MockEntraDirectoryStore
     {
         lock (_gate)
         {
-            var group = ResolveGroup(groupIdOrDisplayName) ?? new MockEntraGroup(
+            var group = ResolveGroup(groupIdOrDisplayName) ?? BuildGroup(
                 groupIdOrDisplayName,
                 groupIdOrDisplayName,
-                ToMailNickname(groupIdOrDisplayName),
-                "Created by LOCAL_MOCK assignment.",
                 "SecurityGroup",
-                true,
-                null);
+                "Created by LOCAL_MOCK assignment.");
             if (!_groups.ContainsKey(group.ObjectId))
             {
                 SeedGroup(group);
@@ -173,6 +357,21 @@ public sealed class MockEntraDirectoryStore
         }
     }
 
+    public int RemoveAllMembers(string groupIdOrDisplayName)
+    {
+        lock (_gate)
+        {
+            var group = ResolveGroup(groupIdOrDisplayName);
+            if (group is null || !_membersByGroupId.TryGetValue(group.ObjectId, out var members))
+            {
+                return 0;
+            }
+            var count = members.Count;
+            members.Clear();
+            return count;
+        }
+    }
+
     public bool HasMembership(string entraObjectId) =>
         ListMemberships(entraObjectId).Count > 0;
 
@@ -184,10 +383,30 @@ public sealed class MockEntraDirectoryStore
         _membersByGroupId.TryAdd(group.ObjectId, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
     }
 
+    private void SeedApplication(MockEntraApplication application)
+    {
+        _applications[application.ObjectId] = application;
+    }
+
     private MockEntraGroup? ResolveGroup(string groupIdOrDisplayName) =>
         _groups.TryGetValue(groupIdOrDisplayName, out var byId)
             ? byId
             : _groups.Values.FirstOrDefault(g => string.Equals(g.DisplayName, groupIdOrDisplayName, StringComparison.OrdinalIgnoreCase));
+
+    private static MockEntraGroup BuildGroup(string objectId, string displayName, string resourceType, string description)
+    {
+        var isUnified = resourceType.Equals("M365Group", StringComparison.OrdinalIgnoreCase)
+            || resourceType.Equals("Team", StringComparison.OrdinalIgnoreCase);
+        return new(
+            objectId,
+            displayName,
+            ToMailNickname(displayName),
+            description,
+            isUnified ? ["Unified"] : [],
+            isUnified,
+            !isUnified,
+            resourceType.Equals("Team", StringComparison.OrdinalIgnoreCase) ? ["Team"] : []);
+    }
 
     private static string ToMailNickname(string value) =>
         new(value.ToLowerInvariant().Where(c => char.IsLetterOrDigit(c) || c == '-').ToArray());

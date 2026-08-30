@@ -1,0 +1,12 @@
+.git
+.vs
+.vscode
+**/bin
+**/obj
+**/node_modules
+**/dist
+artifacts
+.azurite
+*.user
+*.suo
+*.log

@@ -14,6 +14,10 @@ public sealed class Workload
     public string? Owner { get; set; }
     public string? TemplateId { get; set; }
     public bool Active { get; set; } = true;
+    public bool IsDefault { get; set; }
+    public string? AdministrativeUnitExternalId { get; set; }
+    public string? ApplicationExternalId { get; set; }
+    public List<string> ResourceNamePatterns { get; init; } = new();
 
     public List<WorkloadRole> Roles { get; init; } = new();
     public List<WorkloadResource> Resources { get; init; } = new();
@@ -31,6 +35,8 @@ public sealed class WorkloadRole
     public Guid Id { get; init; } = Guid.NewGuid();
     public required Guid WorkloadId { get; init; }
     public required string Name { get; set; }
+    public string? ApplicationId { get; set; }
+    public string? ApplicationRoleId { get; set; }
     public List<Guid> ResourceMappings { get; init; } = new();
 }
 

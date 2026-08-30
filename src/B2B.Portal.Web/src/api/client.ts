@@ -4,7 +4,10 @@ import type {
   WorkloadScenario, ScenarioTemplateDto, ScenarioImportResult,
   GuestImportInspectResult, GuestImportColumnMapping, GuestImportResult,
   UiConfiguration,
-  MockEntraGroup, MockEntraMembership, MockEntraUser,
+  JobStatusResponse,
+  MockEntraApplication, MockEntraApplicationSignIn, MockEntraGroup, MockEntraMembership, MockEntraUser,
+  ScenarioUser,
+  WorkloadMutationResponse,
 } from '../types/domain';
 
 // API_BASE_URL und der Platform-Tenant kommen aus Vite-Env-Variablen (siehe .env.example
@@ -19,6 +22,14 @@ const DEV_PLATFORM_TENANT_ID = import.meta.env.VITE_DEV_PLATFORM_TENANT_ID ?? 'd
 const DEV_PORTAL_USER_MAIL = import.meta.env.VITE_DEV_PORTAL_USER_MAIL ?? 'admin@platform.example';
 const DEV_PORTAL_ROLES = import.meta.env.VITE_DEV_PORTAL_ROLES ?? 'GovernanceAdmin,User,Reviewer';
 
+function devPortalUserMail(): string {
+  return localStorage.getItem('portal-user-mail') ?? DEV_PORTAL_USER_MAIL;
+}
+
+function devPortalRoles(): string {
+  return localStorage.getItem('portal-user-roles') ?? DEV_PORTAL_ROLES;
+}
+
 function devThemeHeader(): Record<string, string> {
   const themeId = localStorage.getItem('portal-theme-id');
   return themeId ? { 'X-Portal-Theme-Id': themeId } : {};
@@ -30,8 +41,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: {
       'Content-Type': 'application/json',
       'X-Platform-Tenant-Id': DEV_PLATFORM_TENANT_ID,
-      'X-Portal-User-Mail': DEV_PORTAL_USER_MAIL,
-      'X-Portal-Roles': DEV_PORTAL_ROLES,
+      'X-Portal-User-Mail': devPortalUserMail(),
+      'X-Portal-Roles': devPortalRoles(),
       ...devThemeHeader(),
       ...(init?.headers ?? {}),
     },
@@ -65,8 +76,8 @@ async function requestForm<T>(path: string, form: FormData): Promise<T> {
     method: 'POST',
     headers: {
       'X-Platform-Tenant-Id': DEV_PLATFORM_TENANT_ID,
-      'X-Portal-User-Mail': DEV_PORTAL_USER_MAIL,
-      'X-Portal-Roles': DEV_PORTAL_ROLES,
+      'X-Portal-User-Mail': devPortalUserMail(),
+      'X-Portal-Roles': devPortalRoles(),
       ...devThemeHeader(),
     },
     body: form,
@@ -102,11 +113,54 @@ function mappingToFormValue(mapping: GuestImportColumnMapping): string {
 
 export const api = {
   health: () => request<{ status: string; mode: string }>('/health'),
+  listJobs: () => request<JobStatusResponse[]>('/api/jobs'),
+  getJobStatus: (jobId: string) => request<JobStatusResponse>(`/api/jobs/${jobId}`),
+  stopJob: (jobId: string) => request<JobStatusResponse>(`/api/jobs/${jobId}/stop`, { method: 'POST' }),
   uiConfiguration: () => request<UiConfiguration>('/api/ui/configuration'),
   myNavigation: () => request<{ items: string[] }>('/api/me/navigation'),
   listMockEntraUsers: () => request<MockEntraUser[]>('/api/dev/mock-entra/users'),
+  listMockEntraLoginUsers: () => request<MockEntraUser[]>('/api/dev/mock-entra/login-users'),
+  upsertMockEntraUser: (user: Partial<MockEntraUser> & Pick<MockEntraUser, 'mail' | 'displayName'>) =>
+    request<MockEntraUser>(user.objectId ? `/api/dev/mock-entra/users/${user.objectId}` : '/api/dev/mock-entra/users', {
+      method: user.objectId ? 'PUT' : 'POST',
+      body: JSON.stringify(user),
+    }),
+  deleteMockEntraUser: (objectId: string) =>
+    request<void>(`/api/dev/mock-entra/users/${objectId}`, { method: 'DELETE' }),
+
   listMockEntraGroups: () => request<MockEntraGroup[]>('/api/dev/mock-entra/groups'),
+  upsertMockEntraGroup: (group: Partial<MockEntraGroup> & Pick<MockEntraGroup, 'displayName' | 'mailEnabled' | 'securityEnabled'>) =>
+    request<MockEntraGroup>(group.objectId ? `/api/dev/mock-entra/groups/${group.objectId}` : '/api/dev/mock-entra/groups', {
+      method: group.objectId ? 'PUT' : 'POST',
+      body: JSON.stringify(group),
+    }),
+  deleteMockEntraGroup: (objectId: string) =>
+    request<void>(`/api/dev/mock-entra/groups/${objectId}`, { method: 'DELETE' }),
+
+  listMockEntraApplications: () => request<MockEntraApplication[]>('/api/dev/mock-entra/applications'),
+  upsertMockEntraApplication: (application: Partial<MockEntraApplication> & Pick<MockEntraApplication, 'displayName'>) =>
+    request<MockEntraApplication>(application.objectId ? `/api/dev/mock-entra/applications/${application.objectId}` : '/api/dev/mock-entra/applications', {
+      method: application.objectId ? 'PUT' : 'POST',
+      body: JSON.stringify(application),
+    }),
+  deleteMockEntraApplication: (objectId: string) =>
+    request<void>(`/api/dev/mock-entra/applications/${objectId}`, { method: 'DELETE' }),
+
   listMockEntraMemberships: () => request<MockEntraMembership[]>('/api/dev/mock-entra/memberships'),
+  upsertMockEntraMembership: (groupId: string, entraObjectId: string) =>
+    request<void>('/api/dev/mock-entra/memberships', {
+      method: 'POST',
+      body: JSON.stringify({ groupId, entraObjectId }),
+    }),
+  deleteMockEntraMembership: (groupId: string, entraObjectId: string) =>
+    request<void>('/api/dev/mock-entra/memberships', {
+      method: 'DELETE',
+      body: JSON.stringify({ groupId, entraObjectId }),
+    }),
+  removeAllMockEntraGroupMembers: (groupId: string) =>
+    request<{ removed: number }>(`/api/dev/mock-entra/groups/${encodeURIComponent(groupId)}/members`, { method: 'DELETE' }),
+  listMockEntraApplicationSignIns: (appId?: string | null) =>
+    request<MockEntraApplicationSignIn[]>(`/api/dev/mock-entra/application-signins${appId ? `?appId=${encodeURIComponent(appId)}` : ''}`),
 
   listGuests: () => request<GuestAccount[]>('/api/guest-accounts'),
   getGuest: (id: string) => request<GuestAccount>(`/api/guest-accounts/${id}`),
@@ -116,16 +170,31 @@ export const api = {
   listWorkloads: () => request<Workload[]>('/api/workloads'),
   listMyWorkloads: () => request<Workload[]>('/api/me/workloads'),
   getWorkload: (id: string) => request<Workload>(`/api/workloads/${id}`),
-  createWorkload: (name: string, owner: string | null, templateId?: string | null) =>
-    request<Workload>('/api/workloads', {
+  createWorkload: (
+    name: string,
+    owner: string | null,
+    templateId?: string | null,
+    isDefault = false,
+    administrativeUnitExternalId?: string | null,
+    applicationExternalId?: string | null,
+    resourceNamePatterns?: string[],
+  ) =>
+    request<WorkloadMutationResponse>('/api/workloads', {
       method: 'POST',
-      body: JSON.stringify({ name, owner, templateId }),
+      body: JSON.stringify({ name, owner, templateId, isDefault, administrativeUnitExternalId, applicationExternalId, resourceNamePatterns }),
     }),
 
-  updateWorkload: (workloadId: string, name: string, owner: string | null) =>
-    request<Workload>(`/api/workloads/${workloadId}`, {
+  updateWorkload: (
+    workloadId: string,
+    name: string,
+    owner: string | null,
+    administrativeUnitExternalId?: string | null,
+    applicationExternalId?: string | null,
+    resourceNamePatterns?: string[],
+  ) =>
+    request<WorkloadMutationResponse>(`/api/workloads/${workloadId}`, {
       method: 'PUT',
-      body: JSON.stringify({ name, owner }),
+      body: JSON.stringify({ name, owner, administrativeUnitExternalId, applicationExternalId, resourceNamePatterns }),
     }),
 
   deactivateWorkload: (workloadId: string) =>
@@ -140,16 +209,16 @@ export const api = {
   getWorkloadAssignmentCounts: (workloadId: string) =>
     request<WorkloadAssignmentCounts>(`/api/workloads/${workloadId}/assignment-counts`),
 
-  createWorkloadRole: (workloadId: string, name: string, resourceMappings: string[]) =>
+  createWorkloadRole: (workloadId: string, name: string, resourceMappings: string[], applicationId?: string | null, applicationRoleId?: string | null) =>
     request<WorkloadRole>(`/api/workloads/${workloadId}/roles`, {
       method: 'POST',
-      body: JSON.stringify({ name, resourceMappings }),
+      body: JSON.stringify({ name, applicationId, applicationRoleId, resourceMappings }),
     }),
 
-  updateWorkloadRole: (workloadId: string, roleId: string, name: string, resourceMappings: string[]) =>
+  updateWorkloadRole: (workloadId: string, roleId: string, name: string, resourceMappings: string[], applicationId?: string | null, applicationRoleId?: string | null) =>
     request<WorkloadRole>(`/api/workloads/${workloadId}/roles/${roleId}`, {
       method: 'PUT',
-      body: JSON.stringify({ name, resourceMappings }),
+      body: JSON.stringify({ name, applicationId, applicationRoleId, resourceMappings }),
     }),
 
   deleteWorkloadRole: (workloadId: string, roleId: string) =>
@@ -177,6 +246,12 @@ export const api = {
       body: JSON.stringify({ decision }),
     }),
 
+  attachWorkloadResource: (workloadId: string, resourceType: string, externalId: string) =>
+    request<WorkloadResource>(`/api/workloads/${workloadId}/resources/attach`, {
+      method: 'POST',
+      body: JSON.stringify({ resourceType, externalId }),
+    }),
+
   listAuditEvents: () => request<AuditEvent[]>('/api/audit-events'),
 
   inviteGuest: (mail: string, displayName: string, directoryTenantId?: string) =>
@@ -202,6 +277,9 @@ export const api = {
 
   listScenarios: (workloadId: string) =>
     request<WorkloadScenario[]>(`/api/workloads/${workloadId}/scenarios`),
+
+  listScenarioUsers: (workloadId: string, scenarioId: string) =>
+    request<ScenarioUser[]>(`/api/workloads/${workloadId}/scenarios/${scenarioId}/users`),
 
   deployScenario: (scenarioId: string) =>
     request<WorkloadScenario>(`/api/scenarios/${scenarioId}/deploy`, { method: 'POST' }),

@@ -97,6 +97,17 @@ public sealed class CosmosJobQueue(CosmosClientFactory factory) : IJobQueue
             new ItemRequestOptions { IfMatchEtag = doc.ETag }, cancellationToken: ct);
     }
 
+    public async Task CancelAsync(Guid jobId, CancellationToken ct)
+    {
+        var doc = await FindByJobIdAsync(jobId, ct);
+        if (doc is null) return;
+
+        var updated = doc with { Status = "Cancelled", LeaseExpiresAt = null };
+        await Container.ReplaceItemAsync(
+            updated, doc.Id, new PartitionKey(doc.PlatformTenantId),
+            new ItemRequestOptions { IfMatchEtag = doc.ETag }, cancellationToken: ct);
+    }
+
     public async Task<int> RetryAsync(Guid jobId, string error, CancellationToken ct)
     {
         var doc = await FindByJobIdAsync(jobId, ct);

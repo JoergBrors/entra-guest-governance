@@ -154,6 +154,13 @@ public sealed class InMemoryJobRepository : IJobRepository
         return Task.FromResult(j is not null && tenant.Owns(j.PlatformTenantId) ? j : null);
     }
 
+    public Task<IReadOnlyList<DirectoryOperation>> ListAsync(TenantContext tenant, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<DirectoryOperation>>(
+            _store.Values
+                .Where(j => tenant.Owns(j.PlatformTenantId))
+                .OrderByDescending(j => j.CreatedAt)
+                .ToList());
+
     public Task<IReadOnlyList<DirectoryOperation>> ListOpenSecurityRelevantAsync(
         TenantContext tenant, Guid guestId, CancellationToken ct) =>
         Task.FromResult<IReadOnlyList<DirectoryOperation>>(

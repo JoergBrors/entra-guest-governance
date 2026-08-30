@@ -6,5 +6,6 @@
     "**/obj": true,
     "**/node_modules": true
   },
-  "typescript.tsdk": "src/B2B.Portal.Web/node_modules/typescript/lib"
+  "typescript.tsdk": "src/B2B.Portal.Web/node_modules/typescript/lib",
+  "FSharp.suggestGitignore": false
 }

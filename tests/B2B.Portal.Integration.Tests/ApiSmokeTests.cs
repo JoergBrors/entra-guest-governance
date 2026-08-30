@@ -113,4 +113,30 @@ public class ApiSmokeTests(WebApplicationFactory<Program> factory) : IClassFixtu
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("anna@contoso.example", body);
     }
+
+    [Fact]
+    public async Task SeedLargeWorkload_PopulatesMockEntra()
+    {
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-seed-mock-entra-test");
+        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "admin@platform.example");
+        client.DefaultRequestHeaders.Add("X-Portal-Roles", "GovernanceAdmin");
+
+        var seedResponse = await client.PostAsJsonAsync("/api/dev/seed/large-workload", new
+        {
+            guestCount = 10,
+            workloadName = "Seed Mock Entra Test",
+        });
+        seedResponse.EnsureSuccessStatusCode();
+
+        var users = await client.GetStringAsync("/api/dev/mock-entra/users");
+        var groups = await client.GetStringAsync("/api/dev/mock-entra/groups");
+        var memberships = await client.GetStringAsync("/api/dev/mock-entra/memberships");
+
+        Assert.Contains("seed-obj-00009", users);
+        Assert.Contains("SG-MERIDIAN-READ", groups);
+        Assert.Contains("groupTypes", groups);
+        Assert.DoesNotContain("workloadName", groups);
+        Assert.Contains("seed-obj-00003", memberships);
+    }
 }

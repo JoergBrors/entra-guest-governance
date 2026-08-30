@@ -1,6 +1,6 @@
 # Local Mock
 
-Stand: 2026-08-29
+Stand: 2026-08-30
 
 `LOCAL_MOCK` bleibt der Default fuer lokale Entwicklung.
 
@@ -27,7 +27,7 @@ Produktive Werte: `configuration required`.
 Der Mock-Stamm enthaelt:
 
 - Gastbenutzer mit Object ID, UPN, Mail, DisplayName, GivenName, Surname, CompanyName, Department, JobTitle, Sponsor, AccountEnabled und UserType.
-- Gruppen mit Object ID, DisplayName, MailNickname, Description, GroupType, SecurityEnabled und optionalem WorkloadName.
+- Gruppen mit Object ID, DisplayName, MailNickname, Description, GroupTypes, MailEnabled, SecurityEnabled und ResourceProvisioningOptions.
 - Gruppenmitgliedschaften zwischen Benutzern und Gruppen.
 
 Worker-Verhalten:
@@ -37,6 +37,7 @@ Worker-Verhalten:
 - DeployScenario kann Mock-Gruppen anlegen.
 - GrantWorkloadRole weist den Benutzer den in der Workload-Rolle gemappten Gruppen zu.
 - RevokeWorkloadRole entfernt diese Gruppenmitgliedschaften.
+- Der Large-Workload-Seed schreibt seine Gastbenutzer, Zielgruppen und aktiven Mitgliedschaften ebenfalls in den Mock-Stamm.
 
 Der Mock fuehrt keine externen Graph-Schreibzugriffe aus.
 
@@ -49,11 +50,14 @@ Die Seite zeigt:
 - Benutzerstamm
 - Gruppenstamm
 - Gruppenmitgliedschaften
+- Pflegeformulare fuer Benutzer, Gruppen und Mitgliedschaften
 
 Die Daten kommen aus:
 
-- `GET /api/dev/mock-entra/users`
-- `GET /api/dev/mock-entra/groups`
-- `GET /api/dev/mock-entra/memberships`
+- `GET|POST /api/dev/mock-entra/users`
+- `PUT|DELETE /api/dev/mock-entra/users/{objectId}`
+- `GET|POST /api/dev/mock-entra/groups`
+- `PUT|DELETE /api/dev/mock-entra/groups/{objectId}`
+- `GET|POST|DELETE /api/dev/mock-entra/memberships`
 
 Die Endpoints werden nur unter `LOCAL_MOCK` registriert und verlangen `GovernanceAdmin`.

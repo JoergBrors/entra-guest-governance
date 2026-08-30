@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using B2B.Portal.Api.Auth;
 using B2B.Portal.Api.Tenancy;
 using B2B.Portal.Application.Commands;
@@ -12,6 +13,7 @@ using B2B.Portal.Domain.Enums;
 using B2B.Portal.Domain.Services;
 using B2B.Portal.Infrastructure;
 using B2B.Portal.Infrastructure.Directory;
+using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -52,6 +54,71 @@ Console.WriteLine($"[B2B.Portal.Api] Startmodus: {mode}");
 
 // ---- Health --------------------------------------------------------------
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", mode }));
+
+app.MapGet("/api/jobs/{id:guid}", async (
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IJobRepository jobRepository, IWorkloadRepository workloadRepository, CancellationToken ct) =>
+{
+    var job = await jobRepository.GetAsync(tenantCtx.Current, id, ct);
+    if (job is null)
+    {
+        return Results.NotFound(new { error = $"Job {id} nicht gefunden." });
+    }
+
+    if (!await CanAccessJobAsync(userCtx.Current, tenantCtx.Current, job, workloadRepository, ct))
+    {
+        return Results.StatusCode(403);
+    }
+
+    return Results.Ok(await ToJobStatusResponseAsync(tenantCtx.Current, job, workloadRepository, ct));
+});
+
+app.MapGet("/api/jobs", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IJobRepository jobRepository, IWorkloadRepository workloadRepository, CancellationToken ct) =>
+{
+    var jobs = await jobRepository.ListAsync(tenantCtx.Current, ct);
+    var visible = new List<JobStatusResponse>();
+    foreach (var job in jobs)
+    {
+        if (await CanAccessJobAsync(userCtx.Current, tenantCtx.Current, job, workloadRepository, ct))
+        {
+            visible.Add(await ToJobStatusResponseAsync(tenantCtx.Current, job, workloadRepository, ct));
+        }
+    }
+
+    return Results.Ok(visible);
+});
+
+app.MapPost("/api/jobs/{id:guid}/stop", async (
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IJobRepository jobRepository, IWorkloadRepository workloadRepository, IJobQueue jobQueue,
+    CancellationToken ct) =>
+{
+    var job = await jobRepository.GetAsync(tenantCtx.Current, id, ct);
+    if (job is null)
+    {
+        return Results.NotFound(new { error = $"Job {id} nicht gefunden." });
+    }
+
+    if (!await CanAccessJobAsync(userCtx.Current, tenantCtx.Current, job, workloadRepository, ct))
+    {
+        return Results.StatusCode(403);
+    }
+
+    if (job.Status is JobStatus.Success or JobStatus.DeadLetter or JobStatus.Failed or JobStatus.Cancelled)
+    {
+        return Results.BadRequest(new { error = $"Job {id} ist bereits im Endstatus {job.Status}." });
+    }
+
+    job.Status = JobStatus.Cancelled;
+    job.LastError = $"Gestoppt durch {userCtx.Current.Mail}.";
+    job.UpdatedAt = DateTimeOffset.UtcNow;
+    await jobRepository.UpsertAsync(job, ct);
+    await jobQueue.CancelAsync(id, ct);
+
+    return Results.Ok(await ToJobStatusResponseAsync(tenantCtx.Current, job, workloadRepository, ct));
+});
 
 app.MapGet("/api/ui/configuration", (IPortalUserContextAccessor userCtx, IConfiguration configuration) =>
 {
@@ -209,7 +276,7 @@ app.MapGet("/api/workloads", async (
 
 app.MapPost("/api/workloads", async (
     CreateWorkloadBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
-    WorkloadManagementService service, CancellationToken ct) =>
+    WorkloadManagementService service, ProvisioningService provisioningService, CancellationToken ct) =>
 {
     if (!userCtx.Current.IsGovernanceAdmin)
     {
@@ -217,13 +284,17 @@ app.MapPost("/api/workloads", async (
     }
 
     var workload = await service.CreateWorkloadAsync(
-        tenantCtx.Current, body.Name, body.Owner, body.TemplateId, userCtx.Current.Mail, ct);
-    return Results.Created($"/api/workloads/{workload.Id}", workload);
+        tenantCtx.Current, body.Name, body.Owner, body.TemplateId,
+        body.IsDefault, body.AdministrativeUnitExternalId, body.ApplicationExternalId,
+        body.ResourceNamePatterns ?? [],
+        userCtx.Current.Mail, ct);
+    var syncJob = await EnqueuePatternSyncJobAsync(tenantCtx.Current, workload, provisioningService, userCtx.Current.Mail, ct);
+    return Results.Created($"/api/workloads/{workload.Id}", new WorkloadMutationResponse(workload, syncJob?.Id));
 });
 
 app.MapPut("/api/workloads/{id:guid}", async (
     Guid id, UpdateWorkloadBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
-    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, ProvisioningService provisioningService, CancellationToken ct) =>
 {
     try
     {
@@ -238,8 +309,12 @@ app.MapPut("/api/workloads/{id:guid}", async (
         }
 
         var workload = await service.UpdateWorkloadAsync(
-            tenantCtx.Current, id, body.Name, body.Owner, actor: userCtx.Current.Mail, ct);
-        return Results.Ok(workload);
+            tenantCtx.Current, id, body.Name, body.Owner,
+            body.AdministrativeUnitExternalId, body.ApplicationExternalId,
+            body.ResourceNamePatterns ?? [],
+            actor: userCtx.Current.Mail, ct);
+        var syncJob = await EnqueuePatternSyncJobAsync(tenantCtx.Current, workload, provisioningService, userCtx.Current.Mail, ct);
+        return Results.Ok(new WorkloadMutationResponse(workload, syncJob?.Id));
     }
     catch (InvalidOperationException ex)
     {
@@ -340,7 +415,9 @@ app.MapPost("/api/workloads/{workloadId:guid}/roles", async (
         if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
 
         var role = await service.UpsertRoleAsync(
-            tenantCtx.Current, workloadId, roleId: null, body.Name, body.ResourceMappings, actor: userCtx.Current.Mail, ct);
+            tenantCtx.Current, workloadId, roleId: null, body.Name,
+            body.ApplicationId, body.ApplicationRoleId, body.ResourceMappings,
+            actor: userCtx.Current.Mail, ct);
         return Results.Ok(role);
     }
     catch (InvalidOperationException ex)
@@ -360,7 +437,9 @@ app.MapPut("/api/workloads/{workloadId:guid}/roles/{roleId:guid}", async (
         if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
 
         var role = await service.UpsertRoleAsync(
-            tenantCtx.Current, workloadId, roleId, body.Name, body.ResourceMappings, actor: userCtx.Current.Mail, ct);
+            tenantCtx.Current, workloadId, roleId, body.Name,
+            body.ApplicationId, body.ApplicationRoleId, body.ResourceMappings,
+            actor: userCtx.Current.Mail, ct);
         return Results.Ok(role);
     }
     catch (InvalidOperationException ex)
@@ -459,6 +538,26 @@ app.MapGet("/api/reviews", async (
     return Results.Ok(reviews);
 });
 
+app.MapPost("/api/workloads/{workloadId:guid}/resources/attach", async (
+    Guid workloadId, AttachWorkloadResourceBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, WorkloadManagementService service, CancellationToken ct) =>
+{
+    try
+    {
+        var workload = await workloadRepo.GetAsync(tenantCtx.Current, workloadId, ct);
+        if (workload is null) return Results.NotFound(new { error = $"Workload {workloadId} nicht gefunden." });
+        if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
+
+        var resource = await service.AttachResourceAsync(
+            tenantCtx.Current, workloadId, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct);
+        return Results.Ok(resource);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
 app.MapPost("/api/reviews/{reviewInstanceId:guid}/items/{reviewItemId:guid}/decision", async (
     Guid reviewInstanceId, Guid reviewItemId, ReviewDecisionBody body,
     ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
@@ -486,7 +585,8 @@ app.MapPost("/api/reviews/{reviewInstanceId:guid}/items/{reviewItemId:guid}/deci
         hash,
         new { ReviewItemId = reviewItemId, Decision = decision.ToString(), Actor = userCtx.Current.Mail },
         Guid.NewGuid(),
-        ct);
+        ct,
+        triggeredBy: userCtx.Current.Mail);
 
     return Results.Accepted();
 });
@@ -618,6 +718,69 @@ app.MapGet("/api/workloads/{workloadId:guid}/scenarios", async (
 
     var scenarios = await repo.ListByWorkloadAsync(tenantCtx.Current, workloadId, ct);
     return Results.Ok(scenarios);
+});
+
+app.MapGet("/api/workloads/{workloadId:guid}/scenarios/{scenarioId:guid}/users", async (
+    Guid workloadId, Guid scenarioId, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, IWorkloadScenarioRepository scenarioRepo, IGuestAccountRepository guestRepo,
+    IAssignmentRepository assignmentRepo, MockEntraDirectoryStore mockEntraStore, CancellationToken ct) =>
+{
+    var workload = await workloadRepo.GetAsync(tenantCtx.Current, workloadId, ct);
+    if (workload is null)
+    {
+        return Results.NotFound(new { error = $"Workload {workloadId} nicht gefunden." });
+    }
+    if (!userCtx.Current.CanManageWorkload(workload.Owner) &&
+        !userCtx.Current.ScenarioManagerWorkloadIds.Contains(workloadId) &&
+        !userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var scenario = await scenarioRepo.GetAsync(tenantCtx.Current, scenarioId, ct);
+    if (scenario is null || scenario.WorkloadId != workloadId)
+    {
+        return Results.NotFound(new { error = $"Szenario {scenarioId} nicht gefunden." });
+    }
+
+    await HydrateMockEntraFromRepositoriesAsync(tenantCtx.Current, mockEntraStore, guestRepo, workloadRepo, assignmentRepo, ct);
+    var scenarioResourceIds = scenario.Rules.Select(r => r.ResourceId).ToHashSet();
+    var roleIds = workload.Roles
+        .Where(role => role.ResourceMappings.Any(scenarioResourceIds.Contains))
+        .Select(role => role.Id)
+        .ToHashSet();
+    var guests = (await guestRepo.ListAsync(tenantCtx.Current, ct)).ToDictionary(g => g.Id);
+    var usersByObjectId = mockEntraStore.ListUsers().ToDictionary(u => u.ObjectId, StringComparer.OrdinalIgnoreCase);
+    var appSignIns = string.IsNullOrWhiteSpace(workload.ApplicationExternalId)
+        ? []
+        : mockEntraStore.ListApplicationSignIns(workload.ApplicationExternalId)
+            .ToDictionary(s => s.EntraObjectId, StringComparer.OrdinalIgnoreCase);
+    var assignments = await assignmentRepo.ListByWorkloadAsync(tenantCtx.Current, workloadId, ct);
+    var rows = assignments
+        .Where(a => roleIds.Contains(a.RoleId))
+        .Select(a =>
+        {
+            guests.TryGetValue(a.GuestId, out var guest);
+            var entraObjectId = guest?.EntraObjectId ?? string.Empty;
+            usersByObjectId.TryGetValue(entraObjectId, out var mockUser);
+            appSignIns.TryGetValue(entraObjectId, out var appSignIn);
+            var role = workload.Roles.FirstOrDefault(r => r.Id == a.RoleId);
+            return new ScenarioUserDto(
+                a.GuestId,
+                entraObjectId,
+                guest?.Mail ?? string.Empty,
+                guest?.DisplayName ?? entraObjectId,
+                guest?.UserType ?? mockUser?.UserType ?? "Guest",
+                role?.Name ?? a.RoleId.ToString(),
+                a.Status.ToString(),
+                a.Status is AssignmentStatus.Active or AssignmentStatus.Approved or AssignmentStatus.Requested,
+                mockUser?.LastLoginAt,
+                appSignIn?.LastLoginAt);
+        })
+        .OrderByDescending(row => row.Active)
+        .ThenBy(row => row.DisplayName)
+        .ToList();
+    return Results.Ok(rows);
 });
 
 app.MapPost("/api/scenarios/import", async (
@@ -808,29 +971,114 @@ app.MapPost("/api/guest-import/commit", async (
 // keine Graph-Schreibzugriffe (siehe README "Drei Development-Modi").
 if (mode == "LOCAL_MOCK")
 {
-    app.MapGet("/api/dev/mock-entra/users", (
-        IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    app.MapGet("/api/dev/mock-entra/users", async (
+        ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store,
+        IGuestAccountRepository guestRepo, IWorkloadRepository workloadRepo, IAssignmentRepository assignmentRepo,
+        CancellationToken ct) =>
     {
         if (!userCtx.Current.IsGovernanceAdmin)
         {
             return Results.StatusCode(403);
         }
 
+        await HydrateMockEntraFromRepositoriesAsync(tenantCtx.Current, store, guestRepo, workloadRepo, assignmentRepo, ct);
         return Results.Ok(store.ListUsers());
     });
 
-    app.MapGet("/api/dev/mock-entra/groups", (
-        IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    app.MapGet("/api/dev/mock-entra/login-users", async (
+        ITenantContextAccessor tenantCtx, MockEntraDirectoryStore store,
+        IGuestAccountRepository guestRepo, IWorkloadRepository workloadRepo, IAssignmentRepository assignmentRepo,
+        CancellationToken ct) =>
+    {
+        await HydrateMockEntraFromRepositoriesAsync(tenantCtx.Current, store, guestRepo, workloadRepo, assignmentRepo, ct);
+        return Results.Ok(store.ListUsers());
+    });
+
+    app.MapPost("/api/dev/mock-entra/users", (
+        UpsertMockEntraUserBody body, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
     {
         if (!userCtx.Current.IsGovernanceAdmin)
         {
             return Results.StatusCode(403);
         }
 
+        var user = store.UpsertUser(ToMockEntraUser(body));
+        return Results.Ok(user);
+    });
+
+    app.MapPut("/api/dev/mock-entra/users/{objectId}", (
+        string objectId, UpsertMockEntraUserBody body, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var user = store.UpsertUser(ToMockEntraUser(body with { ObjectId = objectId }));
+        return Results.Ok(user);
+    });
+
+    app.MapDelete("/api/dev/mock-entra/users/{objectId}", (
+        string objectId, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        return store.DeleteUser(objectId) ? Results.NoContent() : Results.NotFound();
+    });
+
+    app.MapGet("/api/dev/mock-entra/groups", async (
+        ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store,
+        IGuestAccountRepository guestRepo, IWorkloadRepository workloadRepo, IAssignmentRepository assignmentRepo,
+        CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        await HydrateMockEntraFromRepositoriesAsync(tenantCtx.Current, store, guestRepo, workloadRepo, assignmentRepo, ct);
         return Results.Ok(store.ListGroups());
     });
 
-    app.MapGet("/api/dev/mock-entra/memberships", (
+    app.MapPost("/api/dev/mock-entra/groups", (
+        UpsertMockEntraGroupBody body, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var group = store.UpsertGroup(ToMockEntraGroup(body));
+        return Results.Ok(group);
+    });
+
+    app.MapPut("/api/dev/mock-entra/groups/{objectId}", (
+        string objectId, UpsertMockEntraGroupBody body, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var group = store.UpsertGroup(ToMockEntraGroup(body with { ObjectId = objectId }));
+        return Results.Ok(group);
+    });
+
+    app.MapDelete("/api/dev/mock-entra/groups/{objectId}", (
+        string objectId, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        return store.DeleteGroup(objectId) ? Results.NoContent() : Results.NotFound();
+    });
+
+    app.MapGet("/api/dev/mock-entra/applications", (
         IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
     {
         if (!userCtx.Current.IsGovernanceAdmin)
@@ -838,13 +1086,110 @@ if (mode == "LOCAL_MOCK")
             return Results.StatusCode(403);
         }
 
+        return Results.Ok(store.ListApplications());
+    });
+
+    app.MapPost("/api/dev/mock-entra/applications", (
+        UpsertMockEntraApplicationBody body, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var application = store.UpsertApplication(ToMockEntraApplication(body));
+        return Results.Ok(application);
+    });
+
+    app.MapPut("/api/dev/mock-entra/applications/{objectId}", (
+        string objectId, UpsertMockEntraApplicationBody body, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var application = store.UpsertApplication(ToMockEntraApplication(body with { ObjectId = objectId }));
+        return Results.Ok(application);
+    });
+
+    app.MapDelete("/api/dev/mock-entra/applications/{objectId}", (
+        string objectId, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        return store.DeleteApplication(objectId) ? Results.NoContent() : Results.NotFound();
+    });
+
+    app.MapGet("/api/dev/mock-entra/memberships", async (
+        ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store,
+        IGuestAccountRepository guestRepo, IWorkloadRepository workloadRepo, IAssignmentRepository assignmentRepo,
+        CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        await HydrateMockEntraFromRepositoriesAsync(tenantCtx.Current, store, guestRepo, workloadRepo, assignmentRepo, ct);
         return Results.Ok(store.ListAllMemberships());
+    });
+
+    app.MapPost("/api/dev/mock-entra/memberships", (
+        UpsertMockEntraMembershipBody body, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        store.AddMember(body.GroupId, body.EntraObjectId);
+        return Results.NoContent();
+    });
+
+    app.MapDelete("/api/dev/mock-entra/groups/{groupId}/members", (
+        string groupId, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var removed = store.RemoveAllMembers(groupId);
+        return Results.Ok(new { removed });
+    });
+
+    app.MapDelete("/api/dev/mock-entra/memberships", (
+        [FromBody] UpsertMockEntraMembershipBody body, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        store.RemoveMember(body.GroupId, body.EntraObjectId);
+        return Results.NoContent();
+    });
+
+    app.MapGet("/api/dev/mock-entra/application-signins", (
+        string? appId, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        return Results.Ok(store.ListApplicationSignIns(appId));
     });
 
     app.MapPost("/api/dev/seed/large-workload", async (
         SeedLargeWorkloadBody? body, ITenantContextAccessor tenantCtx,
         IWorkloadRepository workloadRepo, IGuestAccountRepository guestRepo,
         IAssignmentRepository assignmentRepo, ProvisioningService provisioningService,
+        MockEntraDirectoryStore mockEntraStore,
         AuditService auditService, CancellationToken ct) =>
     {
         var guestCount = Math.Clamp(body?.GuestCount ?? 500, 1, 5000);
@@ -854,12 +1199,57 @@ if (mode == "LOCAL_MOCK")
 
         var workload = DevSeedData.BuildWorkload(tenantId, body?.WorkloadName);
         await workloadRepo.UpsertAsync(workload, ct);
+        var defaultWorkload = DevSeedData.BuildDefaultWorkload(tenantId);
+        await workloadRepo.UpsertAsync(defaultWorkload, ct);
+        foreach (var resource in workload.Resources.Where(r => IsMockEntraGroupResource(r) && r.ExternalId is not null))
+        {
+            mockEntraStore.EnsureGroup(
+                resource.ResourceType,
+                resource.ExternalId!,
+                new Dictionary<string, string> { ["ResourceType"] = resource.ResourceType });
+        }
+        foreach (var resource in defaultWorkload.Resources.Where(r => IsMockEntraGroupResource(r) && r.ExternalId is not null))
+        {
+            mockEntraStore.EnsureGroup(
+                resource.ResourceType,
+                resource.ExternalId!,
+                new Dictionary<string, string> { ["ResourceType"] = resource.ResourceType });
+        }
+        foreach (var group in mockEntraStore.ListGroups())
+        {
+            if (DevSeedData.MatchesAnyPattern(group.DisplayName, defaultWorkload.ResourceNamePatterns))
+            {
+                defaultWorkload.Resources.Add(new WorkloadResource
+                {
+                    WorkloadId = defaultWorkload.Id,
+                    ResourceType = group.ResourceProvisioningOptions.Contains("Team") ? "Team" : group.GroupTypes.Contains("Unified") ? "M365Group" : "SecurityGroup",
+                    ExternalId = group.DisplayName,
+                    Managed = false,
+                });
+            }
+        }
+        defaultWorkload.UpdatedAt = DateTimeOffset.UtcNow;
+        await workloadRepo.UpsertAsync(defaultWorkload, ct);
 
         var createdGuests = new List<GuestAccount>(guestCount);
+        foreach (var member in DevSeedData.BuildPlatformMembers(tenantId, directoryTenantId))
+        {
+            await guestRepo.UpsertAsync(member, ct);
+            mockEntraStore.UpsertGuestAccount(member);
+            if (!string.IsNullOrWhiteSpace(workload.ApplicationExternalId) && !string.IsNullOrWhiteSpace(member.EntraObjectId))
+            {
+                mockEntraStore.UpsertApplicationSignIn(workload.ApplicationExternalId, member.EntraObjectId, DateTimeOffset.UtcNow.AddDays(-2));
+            }
+        }
         for (var i = 0; i < guestCount; i++)
         {
             var guest = DevSeedData.BuildGuest(tenantId, directoryTenantId, i);
             await guestRepo.UpsertAsync(guest, ct);
+            mockEntraStore.UpsertGuestAccount(guest);
+            if (!string.IsNullOrWhiteSpace(workload.ApplicationExternalId) && !string.IsNullOrWhiteSpace(guest.EntraObjectId))
+            {
+                mockEntraStore.UpsertApplicationSignIn(workload.ApplicationExternalId, guest.EntraObjectId, DateTimeOffset.UtcNow.AddDays(-(i % 90)));
+            }
             createdGuests.Add(guest);
 
             var role = DevSeedData.PickRole(workload, i);
@@ -872,6 +1262,17 @@ if (mode == "LOCAL_MOCK")
                 Status = DevSeedData.PickAssignmentStatus(i),
             };
             await assignmentRepo.UpsertAsync(assignment, ct);
+            if (assignment.Status == AssignmentStatus.Active && guest.EntraObjectId is not null)
+            {
+                foreach (var resourceId in role.ResourceMappings)
+                {
+                    var resource = workload.Resources.FirstOrDefault(r => r.Id == resourceId);
+                    if (resource?.ExternalId is not null)
+                    {
+                        mockEntraStore.AddMember(resource.ExternalId, guest.EntraObjectId);
+                    }
+                }
+            }
 
             // Realistische Job-Historie: pro Gast ein GrantWorkloadRole-Job, damit
             // Worker-Dashboards/Job-Listen (falls spaeter ergaenzt) nicht leer sind.
@@ -880,7 +1281,8 @@ if (mode == "LOCAL_MOCK")
             await provisioningService.EnqueueJobAsync(
                 tenantId, directoryTenantId, JobTypes.GrantWorkloadRole,
                 nameof(GuestWorkloadAssignment), assignment.Id.ToString(), hash,
-                new { GuestId = guest.Id, WorkloadId = workload.Id, RoleId = role.Id }, correlationId, ct);
+                new { GuestId = guest.Id, WorkloadId = workload.Id, RoleId = role.Id },
+                correlationId, ct, triggeredBy: "dev-seed", workloadId: workload.Id);
         }
 
         await auditService.RecordAsync(
@@ -894,6 +1296,7 @@ if (mode == "LOCAL_MOCK")
             workloadName = workload.Name,
             roles = workload.Roles.Select(r => new { r.Id, r.Name }),
             guestCount = createdGuests.Count,
+            defaultWorkloadId = defaultWorkload.Id,
         });
     });
 }
@@ -955,7 +1358,7 @@ static Workload ProjectWorkloadForUser(Workload workload, Guid assignedRoleId)
     var assignedRole = workload.Roles.FirstOrDefault(r => r.Id == assignedRoleId);
     var resourceIds = assignedRole?.ResourceMappings.ToHashSet() ?? [];
 
-    return new Workload
+    var projected = new Workload
     {
         Id = workload.Id,
         PlatformTenantId = workload.PlatformTenantId,
@@ -963,23 +1366,290 @@ static Workload ProjectWorkloadForUser(Workload workload, Guid assignedRoleId)
         Owner = workload.Owner,
         TemplateId = workload.TemplateId,
         Active = workload.Active,
+        IsDefault = workload.IsDefault,
+        AdministrativeUnitExternalId = workload.AdministrativeUnitExternalId,
+        ApplicationExternalId = workload.ApplicationExternalId,
         CreatedAt = workload.CreatedAt,
         UpdatedAt = workload.UpdatedAt,
         Roles = assignedRole is null ? [] : [assignedRole],
         Resources = [.. workload.Resources.Where(r => resourceIds.Contains(r.Id))],
     };
+    projected.ResourceNamePatterns.AddRange(workload.ResourceNamePatterns);
+    return projected;
 }
+
+static async Task<DirectoryOperation?> EnqueuePatternSyncJobAsync(
+    B2B.Portal.Domain.ValueObjects.TenantContext tenant,
+    Workload workload,
+    ProvisioningService provisioningService,
+    string actor,
+    CancellationToken ct)
+{
+    if (workload.ResourceNamePatterns.Count == 0)
+    {
+        return null;
+    }
+
+    return await provisioningService.EnqueueJobAsync(
+        tenant.PlatformTenantId,
+        tenant.DirectoryTenantId,
+        JobTypes.SyncWorkloadPatternResources,
+        nameof(Workload),
+        workload.Id.ToString(),
+        $"{workload.Id}:{string.Join('|', workload.ResourceNamePatterns)}",
+        new
+        {
+            WorkloadId = workload.Id,
+            ResourceNamePatterns = workload.ResourceNamePatterns.ToArray(),
+            Actor = actor,
+        },
+        Guid.NewGuid(),
+        ct,
+        triggeredBy: actor,
+        workloadId: workload.Id);
+}
+
+static async Task<bool> CanAccessJobAsync(
+    PortalUserContext user,
+    B2B.Portal.Domain.ValueObjects.TenantContext tenant,
+    DirectoryOperation job,
+    IWorkloadRepository workloadRepository,
+    CancellationToken ct)
+{
+    if (user.IsGovernanceAdmin)
+    {
+        return true;
+    }
+
+    var workloadId = ResolveJobWorkloadId(job);
+    if (workloadId is null)
+    {
+        return false;
+    }
+
+    var workload = await workloadRepository.GetAsync(tenant, workloadId.Value, ct);
+    return workload is not null && user.CanManageWorkload(workload.Owner);
+}
+
+static Guid? ResolveJobWorkloadId(DirectoryOperation job)
+{
+    if (job.WorkloadId is not null)
+    {
+        return job.WorkloadId;
+    }
+
+    return job.EntityType == nameof(Workload) && Guid.TryParse(job.EntityId, out var workloadId)
+        ? workloadId
+        : null;
+}
+
+static async Task<JobStatusResponse> ToJobStatusResponseAsync(
+    B2B.Portal.Domain.ValueObjects.TenantContext tenant,
+    DirectoryOperation job,
+    IWorkloadRepository workloadRepository,
+    CancellationToken ct)
+{
+    var workloadId = ResolveJobWorkloadId(job);
+    string? workloadName = null;
+    if (workloadId is not null)
+    {
+        var workload = await workloadRepository.GetAsync(tenant, workloadId.Value, ct);
+        workloadName = workload?.Name;
+    }
+
+    return new JobStatusResponse(
+        job.Id, job.JobType, job.EntityType, job.EntityId,
+        job.TriggeredBy, workloadId, workloadName,
+        job.Status.ToString(), job.RetryCount, job.LastError, job.CreatedAt, job.UpdatedAt);
+}
+
+static async Task HydrateMockEntraFromRepositoriesAsync(
+    B2B.Portal.Domain.ValueObjects.TenantContext tenant,
+    MockEntraDirectoryStore mockEntraStore,
+    IGuestAccountRepository guestRepo,
+    IWorkloadRepository workloadRepo,
+    IAssignmentRepository assignmentRepo,
+    CancellationToken ct)
+{
+    var guests = await guestRepo.ListAsync(tenant, ct);
+    foreach (var guest in guests)
+    {
+        mockEntraStore.UpsertGuestAccount(guest);
+    }
+
+    var guestById = guests
+        .Where(g => !string.IsNullOrWhiteSpace(g.EntraObjectId))
+        .ToDictionary(g => g.Id, g => g.EntraObjectId!, EqualityComparer<Guid>.Default);
+    var workloads = await workloadRepo.ListAsync(tenant, ct);
+    foreach (var workload in workloads)
+    {
+        foreach (var resource in workload.Resources.Where(r => IsMockEntraGroupResource(r) && !string.IsNullOrWhiteSpace(r.ExternalId)))
+        {
+            mockEntraStore.EnsureGroup(
+                resource.ResourceType,
+                resource.ExternalId!,
+                new Dictionary<string, string> { ["ResourceType"] = resource.ResourceType, ["WorkloadId"] = workload.Id.ToString() });
+        }
+
+        var assignments = await assignmentRepo.ListByWorkloadAsync(tenant, workload.Id, ct);
+        foreach (var assignment in assignments.Where(a => a.Status is AssignmentStatus.Active or AssignmentStatus.Approved or AssignmentStatus.Requested))
+        {
+            if (!guestById.TryGetValue(assignment.GuestId, out var entraObjectId))
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(workload.ApplicationExternalId)
+                && mockEntraStore.ListApplicationSignIns(workload.ApplicationExternalId)
+                    .All(s => !string.Equals(s.EntraObjectId, entraObjectId, StringComparison.OrdinalIgnoreCase)))
+            {
+                mockEntraStore.UpsertApplicationSignIn(
+                    workload.ApplicationExternalId,
+                    entraObjectId,
+                    DateTimeOffset.UtcNow.AddDays(-Math.Abs(assignment.Id.GetHashCode() % 90)));
+            }
+
+            var role = workload.Roles.FirstOrDefault(r => r.Id == assignment.RoleId);
+            if (role is null)
+            {
+                continue;
+            }
+
+            var groupResources = workload.Resources
+                .Where(r => role.ResourceMappings.Contains(r.Id))
+                .Where(IsMockEntraGroupResource)
+                .Where(r => !string.IsNullOrWhiteSpace(r.ExternalId));
+            foreach (var resource in groupResources)
+            {
+                mockEntraStore.AddMember(resource.ExternalId!, entraObjectId);
+            }
+        }
+    }
+}
+
+static bool IsMockEntraGroupResource(WorkloadResource resource) =>
+    resource.ResourceType.Equals("SecurityGroup", StringComparison.OrdinalIgnoreCase)
+    || resource.ResourceType.Equals("M365Group", StringComparison.OrdinalIgnoreCase)
+    || resource.ResourceType.Equals("Team", StringComparison.OrdinalIgnoreCase);
+
+static MockEntraUser ToMockEntraUser(UpsertMockEntraUserBody body)
+{
+    var parts = body.DisplayName.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    return new(
+        body.ObjectId ?? string.Empty,
+        body.UserPrincipalName ?? string.Empty,
+        body.Mail,
+        body.DisplayName,
+        body.GivenName ?? parts.FirstOrDefault() ?? body.DisplayName,
+        body.Surname ?? parts.Skip(1).FirstOrDefault() ?? string.Empty,
+        body.CompanyName ?? string.Empty,
+        body.Department ?? string.Empty,
+        body.JobTitle ?? string.Empty,
+        body.Sponsor ?? string.Empty,
+        body.AccountEnabled ?? "true",
+        body.UserType ?? "Guest",
+        body.PortalRoles ?? ["User"],
+        body.LastLoginAt);
+}
+
+static MockEntraGroup ToMockEntraGroup(UpsertMockEntraGroupBody body) => new(
+    body.ObjectId ?? string.Empty,
+    body.DisplayName,
+    body.MailNickname ?? string.Empty,
+    body.Description ?? string.Empty,
+    body.GroupTypes ?? [],
+    body.MailEnabled,
+    body.SecurityEnabled,
+    body.ResourceProvisioningOptions ?? []);
+
+static MockEntraApplication ToMockEntraApplication(UpsertMockEntraApplicationBody body) => new(
+    body.ObjectId ?? string.Empty,
+    body.AppId ?? string.Empty,
+    body.DisplayName,
+    body.AppRoles ?? []);
 
 // ---- Request-DTOs ----------------------------------------------------------
 public sealed record InviteGuestBody(string Mail, string DisplayName, string? DirectoryTenantId = null);
 public sealed record AssignmentBody(Guid GuestId, Guid RoleId);
+public sealed record ScenarioUserDto(
+    Guid GuestId,
+    string EntraObjectId,
+    string Mail,
+    string DisplayName,
+    string UserType,
+    string RoleName,
+    string AssignmentStatus,
+    bool Active,
+    DateTimeOffset? LastLoginAt,
+    DateTimeOffset? ApplicationLastLoginAt);
 public sealed record DeletionValidationBody(bool GracePeriodReached);
 public sealed record ReviewDecisionBody(string Decision);
 public sealed record SeedLargeWorkloadBody(int? GuestCount, string? WorkloadName);
-public sealed record CreateWorkloadBody(string Name, string? Owner, string? TemplateId = null);
-public sealed record UpdateWorkloadBody(string Name, string? Owner);
-public sealed record UpsertWorkloadRoleBody(string Name, List<Guid> ResourceMappings);
+public sealed record JobStatusResponse(
+    Guid Id,
+    string JobType,
+    string EntityType,
+    string EntityId,
+    string? TriggeredBy,
+    Guid? WorkloadId,
+    string? WorkloadName,
+    string Status,
+    int RetryCount,
+    string? LastError,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+public sealed record WorkloadMutationResponse(Workload Workload, Guid? PatternSyncJobId);
+public sealed record UpsertMockEntraUserBody(
+    string? ObjectId,
+    string? UserPrincipalName,
+    string Mail,
+    string DisplayName,
+    string? GivenName,
+    string? Surname,
+    string? CompanyName,
+    string? Department,
+    string? JobTitle,
+    string? Sponsor,
+    string? AccountEnabled,
+    string? UserType,
+    List<string>? PortalRoles,
+    DateTimeOffset? LastLoginAt);
+public sealed record UpsertMockEntraGroupBody(
+    string? ObjectId,
+    string DisplayName,
+    string? MailNickname,
+    string? Description,
+    List<string>? GroupTypes,
+    bool MailEnabled,
+    bool SecurityEnabled,
+    List<string>? ResourceProvisioningOptions);
+public sealed record UpsertMockEntraApplicationBody(
+    string? ObjectId,
+    string? AppId,
+    string DisplayName,
+    List<MockEntraApplicationRole>? AppRoles);
+public sealed record UpsertMockEntraMembershipBody(string GroupId, string EntraObjectId);
+public sealed record CreateWorkloadBody(
+    string Name,
+    string? Owner,
+    string? TemplateId = null,
+    bool IsDefault = false,
+    string? AdministrativeUnitExternalId = null,
+    string? ApplicationExternalId = null,
+    List<string>? ResourceNamePatterns = null);
+public sealed record UpdateWorkloadBody(
+    string Name,
+    string? Owner,
+    string? AdministrativeUnitExternalId = null,
+    string? ApplicationExternalId = null,
+    List<string>? ResourceNamePatterns = null);
+public sealed record UpsertWorkloadRoleBody(
+    string Name,
+    string? ApplicationId,
+    string? ApplicationRoleId,
+    List<Guid> ResourceMappings);
 public sealed record UpsertWorkloadResourceBody(string ResourceType, string? ExternalId);
+public sealed record AttachWorkloadResourceBody(string ResourceType, string ExternalId);
 
 /// <summary>JSON-Form des GuestImportColumnMapping für den multipart-Formularfeld
 /// "mapping" — ColumnToField kommt als Dictionary&lt;string,string&gt; über JSON (Spalten-
@@ -1036,7 +1706,10 @@ public static class DevSeedData
             Owner = "workload-owner@platform.example",
             TemplateId = "external-project-standard",
             Active = true,
+            AdministrativeUnitExternalId = "AU-MERIDIAN",
+            ApplicationExternalId = "app-meridian-governance",
         };
+        workload.ResourceNamePatterns.AddRange(["SG-MERIDIAN-*", "GRP-MERIDIAN-*", "TEAM-MERIDIAN-*"]);
 
         var resources = new[]
         {
@@ -1057,11 +1730,88 @@ public static class DevSeedData
         var coreTeam = new WorkloadRole { WorkloadId = workload.Id, Name = "Core Team" };
         coreTeam.ResourceMappings.AddRange([resources[0].Id, resources[1].Id, resources[2].Id, resources[3].Id]);
 
-        var admin = new WorkloadRole { WorkloadId = workload.Id, Name = "Project Admin" };
-        admin.ResourceMappings.AddRange(resources.Select(r => r.Id));
+        var admin = new WorkloadRole
+        {
+            WorkloadId = workload.Id,
+            Name = "Project Admin",
+            ApplicationId = "app-meridian-governance",
+            ApplicationRoleId = "app-role-admin",
+        };
+        admin.ResourceMappings.Add(resources[4].Id);
 
         workload.Roles.AddRange([reader, contributor, coreTeam, admin]);
         return workload;
+    }
+
+    public static Workload BuildDefaultWorkload(string platformTenantId)
+    {
+        var workload = new Workload
+        {
+            PlatformTenantId = platformTenantId,
+            Name = "Default Workload - All Groups",
+            Owner = "admin@platform.example",
+            TemplateId = "default-all-groups-anchor",
+            Active = true,
+            IsDefault = true,
+            AdministrativeUnitExternalId = "AU-DEFAULT-ALL",
+        };
+        workload.ResourceNamePatterns.Add("*");
+        workload.Resources.Add(new WorkloadResource
+        {
+            WorkloadId = workload.Id,
+            ResourceType = "AdministrativeUnit",
+            ExternalId = "AU-DEFAULT-ALL",
+            Managed = true,
+        });
+        return workload;
+    }
+
+    public static IReadOnlyList<GuestAccount> BuildPlatformMembers(string platformTenantId, string directoryTenantId) =>
+    [
+        new()
+        {
+            PlatformTenantId = platformTenantId,
+            DirectoryTenantId = directoryTenantId,
+            Mail = "admin@platform.example",
+            DisplayName = "Platform Admin",
+            Sponsor = "configuration required",
+            EntraObjectId = "mock-member-admin",
+            UserType = "Member",
+        },
+        new()
+        {
+            PlatformTenantId = platformTenantId,
+            DirectoryTenantId = directoryTenantId,
+            Mail = "workload-owner@platform.example",
+            DisplayName = "Workload Owner",
+            Sponsor = "admin@platform.example",
+            EntraObjectId = "mock-member-owner",
+            UserType = "Member",
+        },
+    ];
+
+    public static bool MatchesAnyPattern(string value, IEnumerable<string> patterns) =>
+        patterns.Any(pattern => MatchesPattern(value, pattern));
+
+    private static bool MatchesPattern(string value, string pattern)
+    {
+        if (pattern.StartsWith("regex:", StringComparison.OrdinalIgnoreCase))
+        {
+            return Regex.IsMatch(value, pattern["regex:".Length..], RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        if (pattern.Length >= 2 && pattern.StartsWith('/') && pattern.EndsWith('/'))
+        {
+            return Regex.IsMatch(value, pattern[1..^1], RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        if (pattern == "*")
+        {
+            return true;
+        }
+
+        var expression = "^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+        return Regex.IsMatch(value, expression, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
     /// <summary>
@@ -1108,6 +1858,7 @@ public static class DevSeedData
             DisplayName = $"{first} {last} ({org.Company})",
             Sponsor = Sponsors[index % Sponsors.Length],
             EntraObjectId = $"seed-obj-{index:D5}",
+            UserType = "Guest",
         };
 
         // Realistischer Lifecycle-Mix statt aller Gäste im selben Zustand.

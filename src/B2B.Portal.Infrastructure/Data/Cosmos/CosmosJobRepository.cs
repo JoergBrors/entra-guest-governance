@@ -62,6 +62,24 @@ public sealed class CosmosJobRepository(CosmosClientFactory factory) : IJobRepos
         return results;
     }
 
+    public async Task<IReadOnlyList<DirectoryOperation>> ListAsync(TenantContext tenant, CancellationToken ct)
+    {
+        var query = Container.GetItemQueryIterator<DirectoryOperationDocument>(
+            new QueryDefinition(
+                "SELECT * FROM c WHERE c.platformTenantId = @tenant AND c.entityType = @type ORDER BY c.createdAt DESC")
+                .WithParameter("@tenant", tenant.PlatformTenantId)
+                .WithParameter("@type", EntityType),
+            requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey(tenant.PlatformTenantId) });
+
+        var results = new List<DirectoryOperation>();
+        while (query.HasMoreResults)
+        {
+            var page = await query.ReadNextAsync(ct);
+            results.AddRange(page.Select(d => d.ToEntity()));
+        }
+        return results;
+    }
+
     public Task UpsertAsync(DirectoryOperation job, CancellationToken ct) =>
         Container.UpsertItemAsync(
             DirectoryOperationDocument.FromEntity(job),
@@ -78,6 +96,8 @@ internal sealed class DirectoryOperationDocument
     [JsonPropertyName("jobType")] public required string JobType { get; init; }
     [JsonPropertyName("entityTypeName")] public required string EntityTypeName { get; init; }
     [JsonPropertyName("entityId")] public required string EntityId { get; init; }
+    [JsonPropertyName("triggeredBy")] public string? TriggeredBy { get; init; }
+    [JsonPropertyName("workloadId")] public Guid? WorkloadId { get; init; }
     [JsonPropertyName("correlationId")] public required Guid CorrelationId { get; init; }
     [JsonPropertyName("desiredStateHash")] public required string DesiredStateHash { get; init; }
     [JsonPropertyName("status")] public required JobStatus Status { get; init; }
@@ -94,6 +114,8 @@ internal sealed class DirectoryOperationDocument
         JobType = op.JobType,
         EntityTypeName = op.EntityType,
         EntityId = op.EntityId,
+        TriggeredBy = op.TriggeredBy,
+        WorkloadId = op.WorkloadId,
         CorrelationId = op.CorrelationId,
         DesiredStateHash = op.DesiredStateHash,
         Status = op.Status,
@@ -111,6 +133,8 @@ internal sealed class DirectoryOperationDocument
         JobType = JobType,
         EntityType = EntityTypeName,
         EntityId = EntityId,
+        TriggeredBy = TriggeredBy,
+        WorkloadId = WorkloadId,
         CorrelationId = CorrelationId,
         DesiredStateHash = DesiredStateHash,
         Status = Status,

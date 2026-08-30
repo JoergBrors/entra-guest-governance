@@ -25,6 +25,7 @@ import { loadPortalTheme } from './themes/theme-loader';
 export function App() {
   const [configuration, setConfiguration] = useState<UiConfiguration | null>(null);
   const [themeVersion, setThemeVersion] = useState(0);
+  const [userVersion, setUserVersion] = useState(0);
 
   useEffect(() => {
     api.uiConfiguration()
@@ -35,7 +36,7 @@ export function App() {
         branding: { productName: 'B2B Guest Governance Portal' },
         user: { mail: 'configuration required', roles: ['User'] },
       }));
-  }, [themeVersion]);
+  }, [themeVersion, userVersion]);
 
   const loadedTheme = useMemo(
     () => loadPortalTheme(configuration?.themeId),
@@ -64,6 +65,7 @@ export function App() {
                 platformTenantId={configuration.platformTenantId ?? 'configuration required'}
                 themeId={loadedTheme.definition.id}
                 onThemeChange={handleThemeChange}
+                onUserChange={() => setUserVersion((value) => value + 1)}
               />
             )}
           >
