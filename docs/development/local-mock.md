@@ -1,6 +1,6 @@
 # Local Mock
 
-Stand: 2026-08-30 (aktualisiert: Identity Provider + JWT-Login; Mock-Entra-User-Persistenz + Startup-Hydration; Worker/Trigger-Uebersicht + Job-Restart; Invitation Reminder Worker + Erinnerungs-Policy + Mail Monitor)
+Stand: 2026-08-30 (aktualisiert: Identity Provider + JWT-Login; Mock-Entra-User-Persistenz + Startup-Hydration; Worker/Trigger-Uebersicht + Job-Restart; Invitation Reminder Worker + Erinnerungs-Policy + Mail Monitor; UserType-Erhalt bei Re-Hydration)
 
 `LOCAL_MOCK` bleibt der Default fuer lokale Entwicklung.
 
@@ -122,6 +122,23 @@ Mock-Entra-Benutzer in Cosmos existiert (siehe Abschnitt "Reset & Seed" unten).
 `GET /api/dev/mock-entra/login-users` bleibt als ergaenzender Refresh bestehen (synct
 weiterhin Gast-/Workload-Daten aus dem Tenant in den Mock-Stamm), ist aber nicht mehr der
 einzige Weg, den Store initial zu befuellen.
+
+**UserType-Erhalt bei Re-Hydration (Bugfix):** `HydrateMockEntraFromRepositoriesAsync`
+(laeuft bei fast jedem Request, u.a. bei `GET /api/dev/mock-entra/login-users`) ruft fuer
+jeden `GuestAccount` `UpsertGuestAccount` auf — `GuestAccount.UserType` defaultet auf
+`"Guest"`. Vorher konnte das einen im Mock-Stamm bereits korrekt als `"Member"` gefuehrten
+Benutzer (z.B. `admin@platform.example`, `workload-owner@platform.example`) bei der naechsten
+Re-Hydration stillschweigend auf `"Guest"` zuruecksetzen — sichtbares Symptom: das
+Owner-Dropdown in der Workloads-Admin-UI (filtert auf `userType === "Member"`) blieb leer,
+obwohl Bootstrap-Skripte und der `MockEntraDirectoryStore`-Konstruktor `"Member"` korrekt
+gesetzt hatten. `MockEntraDirectoryStore.UpsertUser` behaelt seither einen bestehenden
+`"Member"`-Wert bei, wenn der eingehende Wert nur der generische Default `"Guest"` ist
+(analog zur bereits bestehenden `PortalRoles`-Preserve-Logik) — ein bewusster Rollenwechsel
+ueber die Mock-Entra-Admin-UI bleibt weiterhin moeglich, da dort ein expliziter `UserType`
+mitgegeben wird. Betrifft alle Wege, wie ein Mock-Member-User entsteht (Store-Konstruktor,
+`scripts/reset-cosmos-dev-data.ps1`, `docker/cosmos-init.ps1`, `BuildPlatformMembers` beim
+Large-Workload-Seed) — der Fix liegt zentral in `UpsertUser`, nicht in den einzelnen
+Bootstrap-Stellen, die bereits alle korrekt `"Member"` setzen.
 
 Der Mock-Stamm enthaelt:
 
