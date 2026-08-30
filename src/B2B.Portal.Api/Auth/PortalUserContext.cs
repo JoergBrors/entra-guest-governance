@@ -1,3 +1,6 @@
+using System.Security.Claims;
+using B2B.Portal.Infrastructure.Auth;
+
 namespace B2B.Portal.Api.Auth;
 
 public static class PortalRoles
@@ -38,7 +41,14 @@ public interface IPortalUserContextAccessor
     PortalUserContext Current { get; }
 }
 
-public sealed class HeaderPortalUserContextAccessor(IHttpContextAccessor httpContextAccessor) : IPortalUserContextAccessor
+/// <summary>
+/// Liest den PortalUserContext aus dem validierten JWT (HttpContext.User), das die
+/// JwtBearer-Middleware in Program.cs bereits geprueft hat — kein erneutes Parsen von
+/// Headern. Ersetzt die fruehere HeaderPortalUserContextAccessor (freie X-Portal-*-Header),
+/// das Interface bleibt unveraendert, damit der komplette Endpoint-Code in Program.cs
+/// unangetastet bleibt.
+/// </summary>
+public sealed class ClaimsPortalUserContextAccessor(IHttpContextAccessor httpContextAccessor) : IPortalUserContextAccessor
 {
     public PortalUserContext Current
     {
@@ -46,33 +56,35 @@ public sealed class HeaderPortalUserContextAccessor(IHttpContextAccessor httpCon
         {
             var ctx = httpContextAccessor.HttpContext
                 ?? throw new InvalidOperationException("Kein HttpContext verfügbar.");
+            var user = ctx.User;
 
-            var mail = ctx.Request.Headers["X-Portal-User-Mail"].FirstOrDefault();
-            if (string.IsNullOrWhiteSpace(mail))
+            if (user.Identity is not { IsAuthenticated: true })
             {
                 throw new UnauthorizedAccessException(
-                    "X-Portal-User-Mail fehlt. In DEV_INTEGRATION/AZURE_DEV wird dieser Wert aus dem validierten Entra-Token abgeleitet.");
+                    "Kein gueltiges Bearer-Token. Login ueber POST /api/auth/mock/login " +
+                    "(EntraIdMock) bzw. den konfigurierten Identity Provider.");
             }
 
-            var roles = ParseSet(ctx.Request.Headers["X-Portal-Roles"].FirstOrDefault());
+            var mail = user.FindFirstValue(ClaimTypes.Email) ?? user.FindFirstValue("email");
+            if (string.IsNullOrWhiteSpace(mail))
+            {
+                throw new UnauthorizedAccessException("Token enthaelt keinen email-Claim.");
+            }
+
+            var roles = user.FindAll(ClaimTypes.Role).Select(c => c.Value)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
             if (roles.Count == 0)
             {
                 roles.Add(PortalRoles.User);
             }
 
-            var scenarioManagerWorkloadIds = ParseSet(ctx.Request.Headers["X-Scenario-Manager-Workload-Ids"].FirstOrDefault())
-                .Select(v => Guid.TryParse(v, out var id) ? id : Guid.Empty)
+            var scenarioManagerWorkloadIds = user.FindAll(PortalJwtClaimTypes.ScenarioManagerWorkloadId)
+                .Select(c => Guid.TryParse(c.Value, out var id) ? id : Guid.Empty)
                 .Where(id => id != Guid.Empty)
                 .ToHashSet();
 
             return new PortalUserContext(mail, roles, scenarioManagerWorkloadIds);
         }
     }
-
-    private static HashSet<string> ParseSet(string? value) =>
-        string.IsNullOrWhiteSpace(value)
-            ? []
-            : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 }
 

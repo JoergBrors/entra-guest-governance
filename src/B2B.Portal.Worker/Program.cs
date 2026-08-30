@@ -1,6 +1,7 @@
 using B2B.Portal.Application.Services;
 using B2B.Portal.Application.Workloads;
 using B2B.Portal.Infrastructure;
+using B2B.Portal.Infrastructure.Auth;
 using B2B.Portal.Worker;
 using B2B.Portal.Worker.Handlers.Discovery;
 using B2B.Portal.Worker.Handlers.Invitation;
@@ -24,7 +25,12 @@ if (mode == "LOCAL_MOCK")
     Console.WriteLine("[B2B.Portal.Worker] LOCAL_MOCK aktiv — keine externen Directory-/Mail-Schreibzugriffe.");
 }
 
-builder.Services.AddB2BInfrastructure(builder.Configuration);
+// Der Worker stellt/validiert selbst keine JWTs (kein HTTP-Endpoint), registriert
+// IdentityProviderConfig/MockJwtIssuer aber trotzdem mit, weil AddB2BInfrastructure sie
+// braucht — hier ist die Doppel-Erzeugung des Dev-Ephemeral-Keys unschaedlich, da der Worker
+// im selben Prozess keine Tokens ausstellt oder prueft.
+builder.Services.AddB2BInfrastructure(
+    builder.Configuration, IdentityProviderConfig.FromConfiguration(builder.Configuration, mode));
 
 // Composition Root: konkrete Application Services registrieren.
 builder.Services.AddSingleton<AuditService>();

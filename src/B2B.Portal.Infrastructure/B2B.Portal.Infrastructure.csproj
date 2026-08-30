@@ -16,6 +16,9 @@
          nur den Build-Check zu umgehen. -->
     <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.46.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <!-- JWT-Ausstellung fuer den EntraIdMock-Identity-Provider (siehe Auth/). Domain bleibt
+         frei von diesem Paket (siehe tests/B2B.Portal.Architecture.Tests). -->
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.2.1" />
   </ItemGroup>
 
   <ItemGroup>

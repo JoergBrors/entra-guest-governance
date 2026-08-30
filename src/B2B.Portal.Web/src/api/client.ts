@@ -9,25 +9,20 @@ import type {
   ScenarioUser,
   WorkloadMutationResponse,
 } from '../types/domain';
+import { getToken } from '../auth/token';
 
-// API_BASE_URL und der Platform-Tenant kommen aus Vite-Env-Variablen (siehe .env.example
-// im Repository-Root -> für das Frontend gespiegelt via VITE_-Präfix, kein Hardcoding).
+// API_BASE_URL kommt aus Vite-Env-Variablen (siehe .env.example im Repository-Root ->
+// für das Frontend gespiegelt via VITE_-Präfix, kein Hardcoding).
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:5000';
 
-// Im MVP/LOCAL_MOCK wird der Platform-Tenant clientseitig aus der lokalen Konfiguration
-// gelesen. In DEV_INTEGRATION/AZURE_DEV übernimmt MSAL/Entra-Login diese Rolle — die
-// Serverseite validiert den Tenant-Kontext ohnehin unabhängig vom Client (siehe
-// B2B.Portal.Api ITenantContextAccessor).
-const DEV_PLATFORM_TENANT_ID = import.meta.env.VITE_DEV_PLATFORM_TENANT_ID ?? 'dev-tenant-a';
-const DEV_PORTAL_USER_MAIL = import.meta.env.VITE_DEV_PORTAL_USER_MAIL ?? 'admin@platform.example';
-const DEV_PORTAL_ROLES = import.meta.env.VITE_DEV_PORTAL_ROLES ?? 'GovernanceAdmin,User,Reviewer';
-
-function devPortalUserMail(): string {
-  return localStorage.getItem('portal-user-mail') ?? DEV_PORTAL_USER_MAIL;
-}
-
-function devPortalRoles(): string {
-  return localStorage.getItem('portal-user-roles') ?? DEV_PORTAL_ROLES;
+// Erweiterung 2026-08-30: Identität/Tenant kommen nicht mehr aus freien X-Portal-*-Headern,
+// sondern aus dem serverseitig validierten JWT (siehe auth/token.ts, B2B.Portal.Api
+// ClaimsPortalUserContextAccessor/ClaimsTenantContextAccessor). Ohne Token wird kein
+// Authorization-Header gesendet — der Server antwortet dann mit 401, die App-Routing-Ebene
+// (App.tsx) leitet in diesem Fall auf /login um.
+function authHeader(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 function devThemeHeader(): Record<string, string> {
@@ -40,9 +35,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      'X-Platform-Tenant-Id': DEV_PLATFORM_TENANT_ID,
-      'X-Portal-User-Mail': devPortalUserMail(),
-      'X-Portal-Roles': devPortalRoles(),
+      ...authHeader(),
       ...devThemeHeader(),
       ...(init?.headers ?? {}),
     },
@@ -75,9 +68,7 @@ async function requestForm<T>(path: string, form: FormData): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: 'POST',
     headers: {
-      'X-Platform-Tenant-Id': DEV_PLATFORM_TENANT_ID,
-      'X-Portal-User-Mail': devPortalUserMail(),
-      'X-Portal-Roles': devPortalRoles(),
+      ...authHeader(),
       ...devThemeHeader(),
     },
     body: form,
@@ -118,6 +109,12 @@ export const api = {
   stopJob: (jobId: string) => request<JobStatusResponse>(`/api/jobs/${jobId}/stop`, { method: 'POST' }),
   uiConfiguration: () => request<UiConfiguration>('/api/ui/configuration'),
   myNavigation: () => request<{ items: string[] }>('/api/me/navigation'),
+  mockLogin: (mail: string) =>
+    request<{ token: string; mail: string; roles: string[]; platformTenantId: string }>('/api/auth/mock/login', {
+      method: 'POST',
+      body: JSON.stringify({ mail }),
+    }),
+  mockLogout: () => request<void>('/api/auth/mock/logout', { method: 'POST' }),
   listMockEntraUsers: () => request<MockEntraUser[]>('/api/dev/mock-entra/users'),
   listMockEntraLoginUsers: () => request<MockEntraUser[]>('/api/dev/mock-entra/login-users'),
   upsertMockEntraUser: (user: Partial<MockEntraUser> & Pick<MockEntraUser, 'mail' | 'displayName'>) =>

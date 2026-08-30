@@ -17,7 +17,12 @@ public sealed record MockEntraUser(
     string AccountEnabled,
     string UserType,
     IReadOnlyList<string> PortalRoles,
-    DateTimeOffset? LastLoginAt = null);
+    DateTimeOffset? LastLoginAt = null,
+    // Tenant-Claim-Bindung fuer den EntraIdMock-Login (Auth/MockJwtIssuer.cs): der Tenant
+    // wird beim Login aus dem gewaehlten Mock-User abgeleitet, nicht separat gewaehlt.
+    // Default "dev-tenant-a" haelt bestehende Seeds/Scripts konsistent (siehe
+    // scripts/seed-dev-data.ps1, scripts/seed-large-workload.ps1).
+    string PlatformTenantId = "dev-tenant-a");
 
 public sealed record MockEntraGroup(
     string ObjectId,
@@ -152,6 +157,9 @@ public sealed class MockEntraDirectoryStore
             UserType = string.IsNullOrWhiteSpace(user.UserType) ? "Guest" : user.UserType,
             PortalRoles = preserveExistingRoles ? existingRoles : user.PortalRoles.Count == 0 ? ["User"] : user.PortalRoles,
             LastLoginAt = user.LastLoginAt ?? existing?.LastLoginAt,
+            PlatformTenantId = string.IsNullOrWhiteSpace(user.PlatformTenantId)
+                ? existing?.PlatformTenantId ?? "dev-tenant-a"
+                : user.PlatformTenantId,
         };
             SeedUser(normalized);
             return normalized;

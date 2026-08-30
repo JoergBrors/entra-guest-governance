@@ -1,4 +1,5 @@
 using B2B.Portal.Application.Ports;
+using B2B.Portal.Infrastructure.Auth;
 using B2B.Portal.Infrastructure.Data;
 using B2B.Portal.Infrastructure.Data.Cosmos;
 using B2B.Portal.Infrastructure.Directory;
@@ -18,8 +19,15 @@ namespace B2B.Portal.Infrastructure;
 /// </summary>
 public static class InfrastructureServiceCollectionExtensions
 {
+    /// <param name="identityProviderConfig">
+    /// WICHTIG: wird vom Aufrufer (Program.cs) exakt einmal per FromConfiguration(...)
+    /// erzeugt und hier NICHT erneut berechnet — sonst wuerden bei fehlendem
+    /// JWT_SIGNING_KEY zwei unterschiedliche Dev-Ephemeral-Keys entstehen (einer fuer die
+    /// JwtBearer-Validierung in Program.cs, einer fuer MockJwtIssuer hier), und jedes
+    /// ausgestellte Token wuerde als ungueltig zurueckgewiesen.
+    /// </param>
     public static IServiceCollection AddB2BInfrastructure(
-        this IServiceCollection services, IConfiguration configuration)
+        this IServiceCollection services, IConfiguration configuration, IdentityProviderConfig identityProviderConfig)
     {
         var mode = configuration["B2B_MODE"] ?? "LOCAL_MOCK";
         var directoryProvider = configuration["DIRECTORY_PROVIDER"] ?? "mock";
@@ -29,6 +37,20 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<IClock, SystemClock>();
         services.AddSingleton<ISpreadsheetReader, ClosedXmlSpreadsheetReader>();
         services.AddSingleton<MockEntraDirectoryStore>();
+
+        // Identity Provider (Erweiterung 2026-08-30: Ablösung der freien X-Portal-*-Header
+        // durch JWT). EntraIdMock ist unter LOCAL_MOCK der Default, EntraId bleibt ein reiner
+        // Konfigurations-Platzhalter (integration pending, siehe IdentityProviderConfig.cs).
+        if (identityProviderConfig.Kind == IdentityProviderKind.EntraIdMock
+            && identityProviderConfig.JwtSigningKey.StartsWith("dev-ephemeral-", StringComparison.Ordinal))
+        {
+            Console.WriteLine(
+                "[B2B.Portal.Infrastructure] WARNUNG: JWT_SIGNING_KEY nicht gesetzt — " +
+                "verwende einen zufaelligen, nur fuer diesen Prozess gueltigen Dev-Key. " +
+                "NIEMALS als echtes Secret verwenden, siehe .env.example.");
+        }
+        services.AddSingleton(identityProviderConfig);
+        services.AddSingleton<MockJwtIssuer>();
 
         // Cosmos DB ist der einzige Datenprovider (Erweiterung 2026-08-30 (Teil 2): InMemory-
         // Repositories entfernt). Nutzt den lokalen Cosmos DB Emulator (siehe

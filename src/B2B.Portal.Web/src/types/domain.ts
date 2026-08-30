@@ -245,7 +245,9 @@ export interface UiConfiguration {
   branding: {
     productName: string;
   };
-  user: {
+  // Nur gefuellt, wenn ein gueltiges Bearer-Token vorliegt (siehe App.tsx) — vor dem Login
+  // liefert /api/ui/configuration Theme/Branding fuer den Login-Screen ohne User-Objekt.
+  user?: {
     mail: string;
     roles: string[];
   };
@@ -266,6 +268,7 @@ export interface MockEntraUser {
   userType: string;
   portalRoles: string[];
   lastLoginAt?: string | null;
+  platformTenantId: string;
 }
 
 export interface MockEntraGroup {

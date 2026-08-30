@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using B2B.Portal.Api.Auth;
@@ -12,8 +13,11 @@ using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
 using B2B.Portal.Domain.Services;
 using B2B.Portal.Infrastructure;
+using B2B.Portal.Infrastructure.Auth;
 using B2B.Portal.Infrastructure.Directory;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,14 +25,45 @@ builder.Configuration.AddDotEnvLocal();
 builder.Configuration.AddEnvironmentVariables();
 
 var mode = builder.Configuration["B2B_MODE"] ?? "LOCAL_MOCK";
+var identityProviderConfig = IdentityProviderConfig.FromConfiguration(builder.Configuration, mode);
 
 builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
 
 builder.Services.AddHttpContextAccessor();
-builder.Services.AddSingleton<ITenantContextAccessor, HeaderTenantContextAccessor>();
-builder.Services.AddSingleton<IPortalUserContextAccessor, HeaderPortalUserContextAccessor>();
-builder.Services.AddB2BInfrastructure(builder.Configuration);
+builder.Services.AddSingleton<ITenantContextAccessor, ClaimsTenantContextAccessor>();
+builder.Services.AddSingleton<IPortalUserContextAccessor, ClaimsPortalUserContextAccessor>();
+builder.Services.AddB2BInfrastructure(builder.Configuration, identityProviderConfig);
+
+// JWT-Bearer-Validierung ersetzt die freien X-Portal-*-Header (Erweiterung 2026-08-30:
+// Identity Provider + JWT). Derselbe Signing-Key wie bei der Ausstellung (MockJwtIssuer) —
+// beide lesen ihn ueber IdentityProviderConfig aus derselben Konfigurationsquelle.
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = IdentityProviderConfig.JwtIssuer,
+            ValidateAudience = true,
+            ValidAudience = IdentityProviderConfig.JwtAudience,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(identityProviderConfig.JwtSigningKey)),
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromMinutes(1),
+        };
+    });
+// FallbackPolicy statt einzelner [Authorize]-Attribute: erzwingt Auth fuer JEDEN Endpoint,
+// der nicht explizit .AllowAnonymous() traegt (Program.cs nutzt durchgehend Minimal APIs ohne
+// Controller-Attribute). Die in-handler Rollenpruefungen (IsGovernanceAdmin etc.) bleiben
+// unveraendert bestehen — dies ist nur die Authentifizierungs-Schicht davor.
+builder.Services.AddAuthorization(options =>
+{
+    options.FallbackPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+});
 
 builder.Services.AddSingleton<AuditService>();
 builder.Services.AddSingleton<ProvisioningService>();
@@ -49,11 +84,60 @@ builder.Services.AddCors(o => o.AddDefaultPolicy(p => p
 var app = builder.Build();
 
 app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
 
-Console.WriteLine($"[B2B.Portal.Api] Startmodus: {mode}");
+Console.WriteLine($"[B2B.Portal.Api] Startmodus: {mode}, IdentityProvider: {identityProviderConfig.Kind}");
 
-// ---- Health --------------------------------------------------------------
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", mode }));
+// ---- Health (kein Auth) ----------------------------------------------------
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", mode })).AllowAnonymous();
+
+// ---- Auth (Erweiterung 2026-08-30: Identity Provider + JWT) ---------------
+// Nur registriert, wenn LOCAL_MOCK aktiv UND der konfigurierte Identity Provider
+// EntraIdMock ist — analog zum bestehenden Muster fuer /api/dev/mock-entra/* weiter unten.
+if (mode == "LOCAL_MOCK" && identityProviderConfig.Kind == IdentityProviderKind.EntraIdMock)
+{
+    app.MapPost("/api/auth/mock/login", async (
+        MockLoginRequest body, MockEntraDirectoryStore store, MockJwtIssuer issuer,
+        IWorkloadRepository workloadRepo, IWorkloadScenarioRepository scenarioRepo,
+        CancellationToken ct) =>
+    {
+        var user = store.ListUsers()
+            .FirstOrDefault(u => string.Equals(u.Mail, body.Mail, StringComparison.OrdinalIgnoreCase));
+        if (user is null)
+        {
+            return Results.NotFound(new { error = $"Kein Mock-Entra-Benutzer mit Mail {body.Mail} gefunden." });
+        }
+
+        // X-Scenario-Manager-Workload-Ids war zuvor ein freier Header (nie tatsaechlich vom
+        // Client gesetzt). Ersatz: workloadIds serverseitig aus WorkloadScenario.ScenarioManagers
+        // ableiten (einzige bestehende Quelle fuer "welcher ScenarioManager gehoert zu welchem
+        // Workload", siehe Domain/Entities/WorkloadScenario.cs) und als Claim in den Token packen.
+        var tenant = B2B.Portal.Domain.ValueObjects.TenantContext.Create(user.PlatformTenantId);
+        var workloads = await workloadRepo.ListAsync(tenant, ct);
+        var scenarioManagerWorkloadIds = new List<Guid>();
+        foreach (var workload in workloads)
+        {
+            var scenarios = await scenarioRepo.ListByWorkloadAsync(tenant, workload.Id, ct);
+            if (scenarios.Any(s => s.ScenarioManagers.Any(m => string.Equals(m, user.Mail, StringComparison.OrdinalIgnoreCase))))
+            {
+                scenarioManagerWorkloadIds.Add(workload.Id);
+            }
+        }
+
+        var token = issuer.IssueToken(
+            user.ObjectId, user.Mail, user.PortalRoles, user.PlatformTenantId, scenarioManagerWorkloadIds);
+
+        return Results.Ok(new MockLoginResponse(token, user.Mail, user.PortalRoles, user.PlatformTenantId));
+    }).AllowAnonymous();
+
+    // JWT ist zustandslos — es gibt serverseitig nichts zu invalidieren (kein Token-Store,
+    // keine Revocation-Liste im MVP). Sign-out ist daher rein clientseitig (sessionStorage
+    // leeren, siehe AppLayout.tsx) und dieser Endpoint ist ein reiner No-op, der nur existiert
+    // damit der Client einen symmetrischen /login-/logout-Aufruf hat, falls spaeter serverseitige
+    // Token-Revocation noetig wird (z.B. bei echtem EntraId-Provider mit Refresh-Tokens).
+    app.MapPost("/api/auth/mock/logout", () => Results.Ok()).AllowAnonymous();
+}
 
 app.MapGet("/api/jobs/{id:guid}", async (
     Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
@@ -121,13 +205,18 @@ app.MapPost("/api/jobs/{id:guid}/stop", async (
     return Results.Ok(await ToJobStatusResponseAsync(tenantCtx.Current, job, workloadRepository, ct));
 });
 
-app.MapGet("/api/ui/configuration", (IPortalUserContextAccessor userCtx, IConfiguration configuration) =>
+// Bewusst ohne [Authorize]/AllowAnonymous-Zwang durch userCtx: die Login-Seite braucht
+// Theme/Branding, bevor ein Token existiert. user/platformTenantId sind nur gefuellt, wenn
+// ein gueltiges Bearer-Token vorliegt (kein Fallback auf einen Default-User mehr — genau das
+// war der urspruengliche Bug: stiller Re-Login nach Sign-out).
+app.MapGet("/api/ui/configuration", (HttpContext ctx, IPortalUserContextAccessor userCtx, IConfiguration configuration) =>
 {
     var themeId = configuration["DEFAULT_PORTAL_THEME_ID"] ?? "corporate-vibrant";
     if (mode == "LOCAL_MOCK")
     {
-        var headerThemeId = app.Services.GetRequiredService<IHttpContextAccessor>()
-            .HttpContext?.Request.Headers["X-Portal-Theme-Id"].FirstOrDefault();
+        // X-Portal-Theme-Id bleibt bewusst ein freier Header — reine UI-Praeferenz, kein
+        // Auth-/Identitaetsbezug (siehe docs/development/local-mock.md).
+        var headerThemeId = ctx.Request.Headers["X-Portal-Theme-Id"].FirstOrDefault();
         if (!string.IsNullOrWhiteSpace(headerThemeId))
         {
             themeId = headerThemeId;
@@ -145,16 +234,23 @@ app.MapGet("/api/ui/configuration", (IPortalUserContextAccessor userCtx, IConfig
         themeId = "corporate-vibrant";
     }
 
-    var user = userCtx.Current;
+    string? platformTenantId = null;
+    object? user = null;
+    if (ctx.User.Identity is { IsAuthenticated: true })
+    {
+        var current = userCtx.Current;
+        platformTenantId = app.Services.GetRequiredService<ITenantContextAccessor>().Current.PlatformTenantId;
+        user = new { current.Mail, roles = current.Roles };
+    }
+
     return Results.Ok(new
     {
-        platformTenantId = app.Services.GetRequiredService<IHttpContextAccessor>()
-            .HttpContext?.Request.Headers["X-Platform-Tenant-Id"].FirstOrDefault(),
+        platformTenantId,
         themeId,
         branding = new { productName = "B2B Guest Governance Portal" },
-        user = new { user.Mail, roles = user.Roles },
+        user,
     });
-});
+}).AllowAnonymous();
 
 // ---- Queries (Blueprint 16.1) --------------------------------------------
 app.MapGet("/api/guest-accounts", async (
@@ -987,13 +1083,21 @@ if (mode == "LOCAL_MOCK")
     });
 
     app.MapGet("/api/dev/mock-entra/login-users", async (
-        ITenantContextAccessor tenantCtx, MockEntraDirectoryStore store,
+        MockEntraDirectoryStore store,
         IGuestAccountRepository guestRepo, IWorkloadRepository workloadRepo, IAssignmentRepository assignmentRepo,
         CancellationToken ct) =>
     {
-        await HydrateMockEntraFromRepositoriesAsync(tenantCtx.Current, store, guestRepo, workloadRepo, assignmentRepo, ct);
+        // Muss vor dem Login erreichbar sein (Login-Screen listet hier die waehlbaren
+        // Mock-User auf) — daher AllowAnonymous und ohne ITenantContextAccessor (der ein
+        // gueltiges Token voraussetzt). Hydration laeuft je Tenant aus dem Mock-Stamm selbst,
+        // nicht mehr aus dem (vor Login nicht vorhandenen) Tenant-Kontext einer Request.
+        foreach (var tenantId in store.ListUsers().Select(u => u.PlatformTenantId).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            await HydrateMockEntraFromRepositoriesAsync(
+                B2B.Portal.Domain.ValueObjects.TenantContext.Create(tenantId), store, guestRepo, workloadRepo, assignmentRepo, ct);
+        }
         return Results.Ok(store.ListUsers());
-    });
+    }).AllowAnonymous();
 
     app.MapPost("/api/dev/mock-entra/users", (
         UpsertMockEntraUserBody body, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
@@ -1551,7 +1655,8 @@ static MockEntraUser ToMockEntraUser(UpsertMockEntraUserBody body)
         body.AccountEnabled ?? "true",
         body.UserType ?? "Guest",
         body.PortalRoles ?? ["User"],
-        body.LastLoginAt);
+        body.LastLoginAt,
+        body.PlatformTenantId ?? "dev-tenant-a");
 }
 
 static MockEntraGroup ToMockEntraGroup(UpsertMockEntraGroupBody body) => new(
@@ -1617,7 +1722,12 @@ public sealed record UpsertMockEntraUserBody(
     string? AccountEnabled,
     string? UserType,
     List<string>? PortalRoles,
-    DateTimeOffset? LastLoginAt);
+    DateTimeOffset? LastLoginAt,
+    string? PlatformTenantId);
+
+public sealed record MockLoginRequest(string Mail);
+
+public sealed record MockLoginResponse(string Token, string Mail, IReadOnlyList<string> Roles, string PlatformTenantId);
 public sealed record UpsertMockEntraGroupBody(
     string? ObjectId,
     string DisplayName,

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -9,13 +10,21 @@ namespace B2B.Portal.Integration.Tests;
 
 /// <summary>
 /// API-Smoke-Tests (MVP-Dokument, TESTS / QUALITY GATES + MVP-Verification-Prompt Punkt 5).
-/// Prüft Health-Endpoint sowie dass Query-Endpoints ohne Tenant-Kontext abgelehnt werden
-/// (Tenant-Leak-Schutz, Blueprint 8/16.1). Repository-Ports sind jetzt ausschliesslich
-/// Cosmos-backed (InMemory entfernt) — daher wird die Konfiguration hier explizit auf die
-/// wohlbekannten lokalen Cosmos-Emulator-Werte gesetzt (unabhaengig davon, ob .env.local im
-/// aktuellen Prozess vorhanden ist) und jeder Fact, der tatsaechlich ein Repository
-/// anspricht, uebersprungen (frühes return), wenn kein Emulator läuft (siehe
+/// Prüft Health-Endpoint sowie dass Query-Endpoints ohne gültiges Bearer-Token abgelehnt
+/// werden (Tenant-/Identity-Leak-Schutz, Blueprint 8/16.1). Repository-Ports sind
+/// ausschliesslich Cosmos-backed (InMemory entfernt) — daher wird die Konfiguration hier
+/// explizit auf die wohlbekannten lokalen Cosmos-Emulator-Werte gesetzt (unabhaengig davon,
+/// ob .env.local im aktuellen Prozess vorhanden ist) und jeder Fact, der tatsaechlich ein
+/// Repository anspricht, uebersprungen (frühes return), wenn kein Emulator läuft (siehe
 /// CosmosEmulatorAvailability) — dotnet test bleibt damit CI-sicher.
+///
+/// Erweiterung 2026-08-30: Die frueheren freien X-Portal-*-Header sind durch JWT ersetzt
+/// (EntraIdMock-Identity-Provider). Tests loggen sich ueber POST /api/auth/mock/login mit
+/// bekannten Mock-Entra-Mails ein und haengen das zurueckgegebene Token als Bearer-Header an,
+/// statt Header direkt zu setzen. Custom-Tenants werden ueber
+/// POST /api/dev/mock-entra/users (als admin@platform.example, GovernanceAdmin) angelegt,
+/// weil der Tenant seit der Umstellung aus dem gewaehlten Mock-User abgeleitet wird, nicht
+/// mehr aus einem freien Header.
 /// </summary>
 public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
 {
@@ -40,6 +49,41 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
         });
     }
 
+    private async Task<string> LoginAsync(HttpClient client, string mail)
+    {
+        var response = await client.PostAsJsonAsync("/api/auth/mock/login", new { mail });
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadFromJsonAsync<MockLoginResponseDto>();
+        return body!.Token;
+    }
+
+    private static void UseToken(HttpClient client, string token) =>
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+    /// <summary>Legt einen Mock-Entra-Benutzer mit gewuenschtem Tenant/Rollen an (ueber den
+    /// bereits authentifizierten admin@platform.example-Client) und loggt sich anschliessend
+    /// als dieser Benutzer in einem frischen Client ein.</summary>
+    private async Task<HttpClient> CreateLoggedInClientAsync(string mail, string platformTenantId, params string[] roles)
+    {
+        var adminClient = _factory.CreateClient();
+        UseToken(adminClient, await LoginAsync(adminClient, "admin@platform.example"));
+
+        var upsertResponse = await adminClient.PostAsJsonAsync("/api/dev/mock-entra/users", new
+        {
+            mail,
+            displayName = mail,
+            portalRoles = roles.Length == 0 ? new[] { "User" } : roles,
+            platformTenantId,
+        });
+        upsertResponse.EnsureSuccessStatusCode();
+
+        var client = _factory.CreateClient();
+        UseToken(client, await LoginAsync(client, mail));
+        return client;
+    }
+
+    private sealed record MockLoginResponseDto(string Token, string Mail, List<string> Roles, string PlatformTenantId);
+
     [Fact]
     public async Task Health_ReturnsHealthy()
     {
@@ -54,30 +98,24 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
-    public async Task GuestAccounts_WithoutTenantHeader_ReturnsServerError_NotData()
+    public async Task GuestAccounts_WithoutToken_ReturnsUnauthorized()
     {
-        if (!EmulatorAvailable) { return; }
-
-        // Kein X-Platform-Tenant-Id-Header gesetzt -> HeaderTenantContextAccessor wirft
-        // UnauthorizedAccessException. Im MVP wird das als 500 sichtbar; für Produktion
-        // ist eine dedizierte Exception-Middleware mit 401/403-Mapping vorgesehen
-        // (siehe docs/architecture/mvp-test-report.md, offene Punkte).
+        // Kein Bearer-Token -> FallbackPolicy (RequireAuthenticatedUser) greift vor jedem
+        // Handler-Code, JwtBearer-Middleware antwortet mit 401.
         var client = _factory.CreateClient();
 
         var response = await client.GetAsync("/api/guest-accounts");
 
-        Assert.NotEqual(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     [Fact]
-    public async Task GuestAccounts_WithTenantHeader_ReturnsOk()
+    public async Task GuestAccounts_WithValidToken_ReturnsOk()
     {
         if (!EmulatorAvailable) { return; }
 
-        var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-smoke-test");
-        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "admin@platform.example");
-        client.DefaultRequestHeaders.Add("X-Portal-Roles", "GovernanceAdmin");
+        var client = await CreateLoggedInClientAsync(
+            "governance-admin-smoke-test@platform.example", "tenant-smoke-test", "GovernanceAdmin");
 
         var response = await client.GetAsync("/api/guest-accounts");
 
@@ -88,10 +126,9 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
     public async Task GuestAccounts_NormalUser_ReturnsForbidden()
     {
         // Autorisierungspruefung greift vor jedem Repository-Zugriff -> kein Emulator noetig.
+        // anna@contoso.example ist im Mock-Stamm seeded (Rolle "User", Tenant dev-tenant-a).
         var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-smoke-test");
-        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "guest@tenant.example");
-        client.DefaultRequestHeaders.Add("X-Portal-Roles", "User");
+        UseToken(client, await LoginAsync(client, "anna@contoso.example"));
 
         var response = await client.GetAsync("/api/guest-accounts");
 
@@ -99,13 +136,22 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
+    public async Task MockLogin_UnknownMail_ReturnsNotFound()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/auth/mock/login", new { mail = "unknown@nowhere.example" });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task UiConfiguration_UnknownTheme_FallsBackToDefault()
     {
         // /api/ui/configuration beruehrt keine Repository-Ports -> laeuft auch ohne Emulator.
+        // Bewusst ohne Login getestet — die Route muss vor dem Login erreichbar sein
+        // (Login-Screen-Bootstrap), das Theme-Fallback funktioniert unabhaengig vom Auth-Status.
         var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-smoke-test");
-        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "admin@platform.example");
-        client.DefaultRequestHeaders.Add("X-Portal-Roles", "GovernanceAdmin");
         client.DefaultRequestHeaders.Add("X-Portal-Theme-Id", "unknown-theme");
 
         var response = await client.GetAsync("/api/ui/configuration");
@@ -120,10 +166,8 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
     {
         if (!EmulatorAvailable) { return; }
 
-        var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-create-workload-test");
-        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "admin@platform.example");
-        client.DefaultRequestHeaders.Add("X-Portal-Roles", "GovernanceAdmin");
+        var client = await CreateLoggedInClientAsync(
+            "workload-create-admin-smoke-test@platform.example", "tenant-create-workload-test", "GovernanceAdmin");
 
         var response = await client.PostAsJsonAsync("/api/workloads", new
         {
@@ -142,9 +186,7 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
         // MockEntraDirectoryStore ist ein reiner In-Memory-Singleton (kein Repository-Port,
         // siehe Klassenkommentar oben) -> laeuft auch ohne Emulator.
         var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-mock-entra-test");
-        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "admin@platform.example");
-        client.DefaultRequestHeaders.Add("X-Portal-Roles", "GovernanceAdmin");
+        UseToken(client, await LoginAsync(client, "admin@platform.example"));
 
         var response = await client.GetAsync("/api/dev/mock-entra/users");
 
@@ -158,10 +200,8 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
     {
         if (!EmulatorAvailable) { return; } // Seed-Endpoint schreibt ueber IWorkloadRepository (Cosmos).
 
-        var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-Platform-Tenant-Id", "tenant-seed-mock-entra-test");
-        client.DefaultRequestHeaders.Add("X-Portal-User-Mail", "admin@platform.example");
-        client.DefaultRequestHeaders.Add("X-Portal-Roles", "GovernanceAdmin");
+        var client = await CreateLoggedInClientAsync(
+            "seed-mock-entra-admin-smoke-test@platform.example", "tenant-seed-mock-entra-test", "GovernanceAdmin");
 
         var seedResponse = await client.PostAsJsonAsync("/api/dev/seed/large-workload", new
         {

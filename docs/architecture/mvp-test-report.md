@@ -298,6 +298,64 @@ Ausgefuehrte Checks:
 | `dotnet build -c Debug` | erfolgreich, 0 Warnungen, 0 Fehler |
 | `dotnet test -c Debug` | erfolgreich, 78 Tests bestanden (Domain 29, Architecture 5, Application 3, Integration 41), 0 fehlgeschlagen — Cosmos-Emulator lief in dieser Umgebung, alle Cosmos-Tests liefen echt (nicht nur uebersprungen) |
 
+## 13. Erweiterung 2026-08-30 (Teil 3): Identity Provider und JWT-Login statt freier Header
+
+Login/Logout hat vorher nicht wirklich funktioniert: die App authentifizierte ueber frei
+client-setzbare Header (`X-Portal-User-Mail`, `X-Portal-Roles`, `X-Platform-Tenant-Id`), und
+`client.ts` fiel nach jedem Sign-out sofort wieder auf `DEV_PORTAL_USER_MAIL`/
+`DEV_PORTAL_ROLES` zurueck — Sign-out hatte keine sichtbare Wirkung.
+
+Neu: `IdentityProviderConfig` (`src/B2B.Portal.Infrastructure/Auth/IdentityProviderConfig.cs`,
+env var `IDENTITY_PROVIDER`, Default `EntraIdMock` unter `LOCAL_MOCK`) mit zwei Kinds:
+
+- `EntraIdMock` — echter Mock-Login: `POST /api/auth/mock/login` mit `{ mail }`, Backend
+  prueft die Existenz im Mock-Entra-Stamm, liest Rollen/Tenant und stellt per
+  `MockJwtIssuer` (`System.IdentityModel.Tokens.Jwt`) ein JWT aus (Claims: `sub`, `email`,
+  `role` je Rolle, `platformTenantId`, `scenarioManagerWorkloadId` je Workload — Letzteres
+  serverseitig aus `WorkloadScenario.ScenarioManagers` abgeleitet statt aus dem frueheren,
+  nie tatsaechlich gesetzten `X-Scenario-Manager-Workload-Ids`-Header). `POST
+  /api/auth/mock/logout` ist ein No-op (JWT ist zustandslos).
+- `EntraId` — reiner Konfigurations-Platzhalter fuer echtes OIDC. `integration pending`,
+  analog zum bestehenden Muster in `docs/architecture/graph-integration.md`.
+
+`MockEntraUser` (`src/B2B.Portal.Infrastructure/Directory/MockGuestDirectory.cs`) hat ein
+neues Feld `PlatformTenantId` (Default `dev-tenant-a`) — der Tenant wird beim Login aus dem
+gewaehlten Mock-User abgeleitet, nicht mehr separat gewaehlt. `UpsertUser` sowie die
+`/api/dev/mock-entra/users`-CRUD-Endpunkte und ihre DTOs tragen das Feld durch.
+
+`HeaderPortalUserContextAccessor`/`HeaderTenantContextAccessor` durch
+`ClaimsPortalUserContextAccessor`/`ClaimsTenantContextAccessor` ersetzt (Interfaces
+`IPortalUserContextAccessor`/`ITenantContextAccessor` unveraendert) — lesen jetzt aus dem
+von der `JwtBearer`-Middleware validierten `HttpContext.User` statt aus Headern.
+`Program.cs` registriert `AddAuthentication().AddJwtBearer(...)` mit symmetrischem
+Signing-Key (`JWT_SIGNING_KEY`, sonst zufaelliger Dev-Ephemeral-Key mit Startup-Warnung) und
+erzwingt Auth global per `FallbackPolicy` (`RequireAuthenticatedUser`), mit `AllowAnonymous()`
+auf `/health`, `/api/auth/mock/login`, `/api/auth/mock/logout`, `/api/ui/configuration` und
+`/api/dev/mock-entra/login-users` (muss vor dem Login erreichbar sein). Die bestehenden
+In-Handler-Rollenpruefungen (`IsGovernanceAdmin` etc.) blieben unveraendert. `X-Portal-Theme-Id`
+bleibt bewusst ein freier Header (reine UI-Praeferenz, kein Auth-Bezug).
+
+Frontend: `LoginPage` (`src/B2B.Portal.Web/src/pages/LoginPage.tsx`) ersetzt den
+`Dev Login`-Dropdown in `AppLayout.tsx`. Token liegt in `sessionStorage` (nicht
+`localStorage` — Tab schliessen beendet die Session), `src/B2B.Portal.Web/src/auth/token.ts`
+decodiert Claims clientseitig ohne zusaetzliche Library. `client.ts` sendet
+`Authorization: Bearer <token>` statt der drei X-Portal-*-Header; ohne Token faellt `App.tsx`
+auf die Login-Seite zurueck statt still weiterzulaufen.
+
+`ApiSmokeTests` auf Login-ueber-JWT umgestellt (Helper `LoginAsync`/`CreateLoggedInClientAsync`
+statt direktem Header-Setzen); zwei neue Faelle ergaenzt (`GuestAccounts_WithoutToken_
+ReturnsUnauthorized`, `MockLogin_UnknownMail_ReturnsNotFound`).
+
+Ausgefuehrte Checks:
+
+| Check | Ergebnis |
+| --- | --- |
+| `dotnet build -c Debug` | erfolgreich, 0 Warnungen, 0 Fehler |
+| `dotnet test -c Debug` | erfolgreich, 79 Tests bestanden (Domain 29, Architecture 5, Application 3, Integration 42), 0 fehlgeschlagen — Cosmos-Emulator lief in dieser Umgebung, alle Cosmos-Tests liefen echt |
+| `npm run build` (B2B.Portal.Web) | erfolgreich, 0 TypeScript-Fehler |
+| `npm run test -- --run` (B2B.Portal.Web) | erfolgreich, 5 Tests bestanden |
+| Manueller E2E-Smoke-Test (laufender Emulator) | `POST /api/auth/mock/login` liefert JWT; `GET /api/workloads` mit Token 200, ohne Token 401; unbekannte Mail beim Login 404 |
+
 ## Gesamtstatus
 
 **PASS WITH PENDING INTEGRATIONS** — Frontend und Backend bauen und testen vollständig
