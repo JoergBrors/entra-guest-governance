@@ -77,3 +77,40 @@ foreach ($container in $containers) {
         Write-Host "Container '$($container.id)' already exists."
     }
 }
+
+# Henne-Ei-Problem (siehe scripts/reset-cosmos-dev-data.ps1, dieselbe Logik): ohne diesen
+# Seed-Datensatz gaebe es nach einem frischen Compose-Up keinen Weg, sich ueber
+# POST /api/auth/mock/login anzumelden, da MockEntraDirectoryStore beim API-Start aus dem
+# Container "discovery" hydriert (CosmosMockEntraUserRepository, entityType "MockEntraUser").
+# Feldnamen/Casing muessen exakt zu MockEntraUserDocument passen (camelCase JsonPropertyName).
+$adminTenantId = "dev-tenant-a"
+$adminMail = "admin@platform.example"
+$adminObjectId = "mock-member-admin"
+$adminUserDoc = @{
+    id                = "mock-entra-user-$adminObjectId"
+    entityType        = "MockEntraUser"
+    platformTenantId  = $adminTenantId
+    objectId          = $adminObjectId
+    userPrincipalName = $adminMail
+    mail              = $adminMail
+    displayName       = "Platform Admin"
+    givenName         = "Platform"
+    surname           = "Admin"
+    companyName       = "Platform"
+    department        = "IT"
+    jobTitle          = "Governance Administrator"
+    sponsor           = "configuration required"
+    accountEnabled    = "true"
+    userType          = "Member"
+    portalRoles       = @("GovernanceAdmin", "User", "Reviewer")
+    lastLoginAt       = $null
+}
+
+try {
+    Invoke-CosmosRequest -Method "POST" -ResourceType "docs" -ResourceLink "dbs/$DatabaseId/colls/discovery" -Path "dbs/$DatabaseId/colls/discovery/docs" -Body $adminUserDoc | Out-Null
+    Write-Host "Mock-Entra-Benutzer '$adminMail' (Rolle GovernanceAdmin, Tenant '$adminTenantId') created."
+}
+catch {
+    if ($_.Exception.Response.StatusCode.value__ -ne 409) { throw }
+    Write-Host "Mock-Entra-Benutzer '$adminMail' already exists."
+}
