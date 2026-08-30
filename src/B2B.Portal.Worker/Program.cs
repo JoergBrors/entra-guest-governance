@@ -73,6 +73,7 @@ if (mode == "LOCAL_MOCK")
 {
     builder.Services.AddHostedService<ApplicationSignInSyncWorker>();
     builder.Services.AddHostedService<InvitationReminderWorker>();
+    builder.Services.AddHostedService<WorkloadPatternSyncWorker>();
 }
 
 var host = builder.Build();

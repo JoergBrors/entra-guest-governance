@@ -1,6 +1,6 @@
 # Worker Model
 
-Stand: 2026-08-30 (aktualisiert: Invitation Reminder Worker)
+Stand: 2026-08-30 (aktualisiert: Invitation Reminder Worker; periodischer Workload-Pattern-Sync)
 
 Der Worker liegt in `src/B2B.Portal.Worker`.
 
@@ -20,6 +20,17 @@ Kernbestand:
   unveraendert). Idempotenz gegen doppelten Versand liegt NICHT im Dispatcher, sondern im
   Scanner selbst: `GuestAccount.LastReminderStageSent` verhindert, dass dieselbe Stufe fuer
   denselben Gast zweimal enqueued wird.
+- `WorkloadPatternSyncWorker.cs` (Erweiterung 2026-08-30, Teil 5): dritter eigenstaendiger
+  `BackgroundService`, gleiches 10-Minuten-`PeriodicTimer`-Muster. Vorher wurde
+  `SyncWorkloadPatternResources` ausschliesslich beim Erstellen/Bearbeiten eines Workloads in
+  der API ausgeloest (`EnqueuePatternSyncJobAsync`, `Program.cs`) — neu im Mock-Entra-Stamm
+  hinzugekommene Gruppen, die auf ein bereits bestehendes `ResourceNamePatterns`-Pattern
+  passen, wurden dadurch nie automatisch erfasst, solange niemand den Workload erneut
+  speicherte. Dieser Worker reiht jetzt periodisch fuer jeden aktiven Workload mit gesetzten
+  Patterns erneut einen Sync-Job ein — bewusst auch dann, wenn der letzte Zyklus bereits
+  erfolgreich war (der Handler selbst ist idempotent, haengt nur tatsaechlich neue Treffer an).
+  Einzige Sperre: ein Job desselben Typs+Workloads im Status `Pending`/`Running` verhindert
+  einen zweiten gleichzeitig laufenden Sync fuer denselben Workload.
 
 Der Dispatcher prueft `PlatformTenantId`, nutzt Retry/DeadLetter und delegiert an registrierte Handler. Er schreibt den Job-Status (`Running`/`Success`/`Retry`/`DeadLetter`/`Cancelled`) laufend in `IJobRepository` zurueck und prueft vor/nach der Handler-Ausfuehrung auf Cancellation (`POST /api/jobs/{id}/stop` in der API, `CancelAsync` in `CosmosJobQueue`/`LocalJobQueue`).
 
