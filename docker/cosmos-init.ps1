@@ -12,7 +12,8 @@ function Invoke-CosmosRequest {
         [string]$ResourceType,
         [string]$ResourceLink,
         [string]$Path,
-        [hashtable]$Body = $null
+        [hashtable]$Body = $null,
+        [string]$PartitionKey = $null
     )
 
     $utcDate = [DateTime]::UtcNow.ToString("r")
@@ -21,14 +22,19 @@ function Invoke-CosmosRequest {
     $signature = [Convert]::ToBase64String($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($stringToSign)))
     $authEncoded = [Uri]::EscapeDataString("type=master&ver=1.0&sig=$signature")
 
+    $headers = @{
+        "x-ms-date" = $utcDate
+        "x-ms-version" = "2018-12-31"
+        "Authorization" = $authEncoded
+    }
+    if ($PartitionKey) {
+        $headers["x-ms-documentdb-partitionkey"] = "[`"$PartitionKey`"]"
+    }
+
     $params = @{
         Method = $Method
         Uri = "$Endpoint/$Path"
-        Headers = @{
-            "x-ms-date" = $utcDate
-            "x-ms-version" = "2018-12-31"
-            "Authorization" = $authEncoded
-        }
+        Headers = $headers
         ContentType = "application/json"
         SkipCertificateCheck = $true
         ErrorAction = "Stop"
@@ -107,7 +113,7 @@ $adminUserDoc = @{
 }
 
 try {
-    Invoke-CosmosRequest -Method "POST" -ResourceType "docs" -ResourceLink "dbs/$DatabaseId/colls/discovery" -Path "dbs/$DatabaseId/colls/discovery/docs" -Body $adminUserDoc | Out-Null
+    Invoke-CosmosRequest -Method "POST" -ResourceType "docs" -ResourceLink "dbs/$DatabaseId/colls/discovery" -Path "dbs/$DatabaseId/colls/discovery/docs" -Body $adminUserDoc -PartitionKey $adminTenantId | Out-Null
     Write-Host "Mock-Entra-Benutzer '$adminMail' (Rolle GovernanceAdmin, Tenant '$adminTenantId') created."
 }
 catch {
