@@ -179,6 +179,21 @@ public sealed class MockEntraDirectoryStore
             var preserveExistingRoles = existingRoles.Count > 0
                 && user.PortalRoles.Count == 1
                 && user.PortalRoles.Contains("User", StringComparer.OrdinalIgnoreCase);
+            // Bug (gefunden live: Owner-Dropdown in WorkloadsAdminPage blieb leer, weil
+            // admin@platform.example/workload-owner@platform.example als UserType "Guest"
+            // statt "Member" im Store landeten): HydrateMockEntraFromRepositoriesAsync ruft
+            // bei praktisch jedem Request UpsertGuestAccount(guest) fuer ALLE GuestAccounts
+            // auf, mit GuestAccount.UserType als Default "Guest" (siehe GuestAccount.cs). Ein
+            // bereits im Store als "Member" bekannter User (aus BuildPlatformMembers oder der
+            // reset-cosmos-dev-data.ps1-Bootstrap-Zeile) wurde dadurch bei der naechsten
+            // Hydration stumpf auf "Guest" zurueckgesetzt — analog zur bereits bestehenden
+            // PortalRoles-Preserve-Logik oben wird "Member" daher nicht mehr von "Guest"
+            // ueberschrieben, wohl aber umgekehrt (ein echter Rollenwechsel Member->Guest ueber
+            // die Mock-Entra-Admin-UI bleibt moeglich, da dort ein expliziter UserType kommt,
+            // der hier nicht "Guest" waere, wenn er es nicht sein soll).
+            var preserveExistingUserType = existing is not null
+                && existing.UserType.Equals("Member", StringComparison.OrdinalIgnoreCase)
+                && user.UserType.Equals("Guest", StringComparison.OrdinalIgnoreCase);
             var normalized = user with
             {
                 ObjectId = objectId,
@@ -186,7 +201,9 @@ public sealed class MockEntraDirectoryStore
                     ? $"{user.Mail.Replace("@", "_", StringComparison.OrdinalIgnoreCase)}#EXT#@platform.example"
                     : user.UserPrincipalName,
                 AccountEnabled = string.IsNullOrWhiteSpace(user.AccountEnabled) ? "true" : user.AccountEnabled,
-            UserType = string.IsNullOrWhiteSpace(user.UserType) ? "Guest" : user.UserType,
+            UserType = preserveExistingUserType
+                ? existing!.UserType
+                : string.IsNullOrWhiteSpace(user.UserType) ? "Guest" : user.UserType,
             PortalRoles = preserveExistingRoles ? existingRoles : user.PortalRoles.Count == 0 ? ["User"] : user.PortalRoles,
             LastLoginAt = user.LastLoginAt ?? existing?.LastLoginAt,
             PlatformTenantId = string.IsNullOrWhiteSpace(user.PlatformTenantId)
