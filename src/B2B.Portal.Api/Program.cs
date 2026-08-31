@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using B2B.Portal.Api.Auth;
@@ -12,8 +13,12 @@ using B2B.Portal.Domain.Entities;
 using B2B.Portal.Domain.Enums;
 using B2B.Portal.Domain.Services;
 using B2B.Portal.Infrastructure;
+using B2B.Portal.Infrastructure.Auth;
 using B2B.Portal.Infrastructure.Directory;
+using B2B.Portal.Infrastructure.Email;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,14 +26,45 @@ builder.Configuration.AddDotEnvLocal();
 builder.Configuration.AddEnvironmentVariables();
 
 var mode = builder.Configuration["B2B_MODE"] ?? "LOCAL_MOCK";
+var identityProviderConfig = IdentityProviderConfig.FromConfiguration(builder.Configuration, mode);
 
 builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
 
 builder.Services.AddHttpContextAccessor();
-builder.Services.AddSingleton<ITenantContextAccessor, HeaderTenantContextAccessor>();
-builder.Services.AddSingleton<IPortalUserContextAccessor, HeaderPortalUserContextAccessor>();
-builder.Services.AddB2BInfrastructure(builder.Configuration);
+builder.Services.AddSingleton<ITenantContextAccessor, ClaimsTenantContextAccessor>();
+builder.Services.AddSingleton<IPortalUserContextAccessor, ClaimsPortalUserContextAccessor>();
+builder.Services.AddB2BInfrastructure(builder.Configuration, identityProviderConfig);
+
+// JWT-Bearer-Validierung ersetzt die freien X-Portal-*-Header (Erweiterung 2026-08-30:
+// Identity Provider + JWT). Derselbe Signing-Key wie bei der Ausstellung (MockJwtIssuer) —
+// beide lesen ihn ueber IdentityProviderConfig aus derselben Konfigurationsquelle.
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = IdentityProviderConfig.JwtIssuer,
+            ValidateAudience = true,
+            ValidAudience = IdentityProviderConfig.JwtAudience,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(identityProviderConfig.JwtSigningKey)),
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromMinutes(1),
+        };
+    });
+// FallbackPolicy statt einzelner [Authorize]-Attribute: erzwingt Auth fuer JEDEN Endpoint,
+// der nicht explizit .AllowAnonymous() traegt (Program.cs nutzt durchgehend Minimal APIs ohne
+// Controller-Attribute). Die in-handler Rollenpruefungen (IsGovernanceAdmin etc.) bleiben
+// unveraendert bestehen — dies ist nur die Authentifizierungs-Schicht davor.
+builder.Services.AddAuthorization(options =>
+{
+    options.FallbackPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+});
 
 builder.Services.AddSingleton<AuditService>();
 builder.Services.AddSingleton<ProvisioningService>();
@@ -49,11 +85,107 @@ builder.Services.AddCors(o => o.AddDefaultPolicy(p => p
 var app = builder.Build();
 
 app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
 
-Console.WriteLine($"[B2B.Portal.Api] Startmodus: {mode}");
+Console.WriteLine($"[B2B.Portal.Api] Startmodus: {mode}, IdentityProvider: {identityProviderConfig.Kind}");
 
-// ---- Health --------------------------------------------------------------
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", mode }));
+// ---- Startup-Hydration Mock-Entra-Store (nur LOCAL_MOCK) -------------------
+// Erweiterung 2026-08-30 (Teil 3): loest das Henne-Ei-Problem nach einem Cosmos-Reset/
+// API-Neustart — vorher war MockEntraDirectoryStore ein reiner In-Memory-Singleton, der bei
+// jedem Prozessstart leer war, und POST /api/auth/mock/login konnte dadurch niemanden
+// finden, solange nicht zuvor GET /api/dev/mock-entra/login-users aufgerufen wurde (das
+// wiederum nur bereits bekannte Tenants re-hydriert hat — bei leerem Store also gar keine).
+// Laedt jetzt beim Start direkt aus Cosmos (IMockEntraUserRepository, der "Source of Truth"
+// fuer PortalRoles seit CosmosMockEntraUserRepository), sodass der Login direkt nach
+// `dotnet run` funktioniert, ohne vorherigen Warm-up-Request.
+if (mode == "LOCAL_MOCK")
+{
+    using var startupScope = app.Services.CreateScope();
+    var mockEntraStore = startupScope.ServiceProvider.GetRequiredService<MockEntraDirectoryStore>();
+    try
+    {
+        await mockEntraStore.HydrateFromRepositoryAsync(CancellationToken.None);
+
+        // Discovery-Reconciliation statt Reparatur (Erweiterung 2026-08-31): der dedizierte
+        // Container "entraid" ist jetzt die vollstaendige, garantierte Quelle fuer den
+        // Mock-Entra-Bestand (siehe HydrateFromRepositoryAsync oben) — ReconcileWorkloadResourcesAsync
+        // prueft nur noch, ob alle von Workloads referenzierten Ressourcen dort auch bekannt
+        // sind, und meldet Abweichungen als Warnung statt sie automatisch nachzubauen.
+        var workloadRepo = startupScope.ServiceProvider.GetRequiredService<IWorkloadRepository>();
+        var startupLogger = startupScope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+        var missingCount = 0;
+        foreach (var tenantId in mockEntraStore.ListKnownPlatformTenantIds())
+        {
+            missingCount += await mockEntraStore.ReconcileWorkloadResourcesAsync(
+                B2B.Portal.Domain.ValueObjects.TenantContext.Create(tenantId), workloadRepo, startupLogger, CancellationToken.None);
+        }
+
+        Console.WriteLine(
+            $"[B2B.Portal.Api] Mock-Entra-Store beim Start hydriert: {mockEntraStore.ListUsers().Count} Benutzer, " +
+            $"{mockEntraStore.ListGroups().Count} Gruppen bekannt" +
+            (missingCount > 0 ? $" ({missingCount} Workload-Ressource(n) ohne bekannte Verzeichnis-Gruppe, siehe Warnungen oben)." : "."));
+    }
+    catch (Exception ex)
+    {
+        // Cosmos-Emulator evtl. noch nicht bereit / nicht erreichbar — die hart codierten
+        // Default-Demo-User aus dem MockEntraDirectoryStore-Konstruktor bleiben trotzdem
+        // nutzbar, daher hier nur warnen statt den Start abzubrechen.
+        Console.WriteLine(
+            $"[B2B.Portal.Api] WARNUNG: Startup-Hydration des Mock-Entra-Store fehlgeschlagen " +
+            $"(Cosmos evtl. nicht erreichbar): {ex.Message}");
+    }
+}
+
+// ---- Health (kein Auth) ----------------------------------------------------
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", mode })).AllowAnonymous();
+
+// ---- Auth (Erweiterung 2026-08-30: Identity Provider + JWT) ---------------
+// Nur registriert, wenn LOCAL_MOCK aktiv UND der konfigurierte Identity Provider
+// EntraIdMock ist — analog zum bestehenden Muster fuer /api/dev/mock-entra/* weiter unten.
+if (mode == "LOCAL_MOCK" && identityProviderConfig.Kind == IdentityProviderKind.EntraIdMock)
+{
+    app.MapPost("/api/auth/mock/login", async (
+        MockLoginRequest body, MockEntraDirectoryStore store, MockJwtIssuer issuer,
+        IWorkloadRepository workloadRepo, IWorkloadScenarioRepository scenarioRepo,
+        CancellationToken ct) =>
+    {
+        var user = store.ListUsers()
+            .FirstOrDefault(u => string.Equals(u.Mail, body.Mail, StringComparison.OrdinalIgnoreCase));
+        if (user is null)
+        {
+            return Results.NotFound(new { error = $"Kein Mock-Entra-Benutzer mit Mail {body.Mail} gefunden." });
+        }
+
+        // X-Scenario-Manager-Workload-Ids war zuvor ein freier Header (nie tatsaechlich vom
+        // Client gesetzt). Ersatz: workloadIds serverseitig aus WorkloadScenario.ScenarioManagers
+        // ableiten (einzige bestehende Quelle fuer "welcher ScenarioManager gehoert zu welchem
+        // Workload", siehe Domain/Entities/WorkloadScenario.cs) und als Claim in den Token packen.
+        var tenant = B2B.Portal.Domain.ValueObjects.TenantContext.Create(user.PlatformTenantId);
+        var workloads = await workloadRepo.ListAsync(tenant, ct);
+        var scenarioManagerWorkloadIds = new List<Guid>();
+        foreach (var workload in workloads)
+        {
+            var scenarios = await scenarioRepo.ListByWorkloadAsync(tenant, workload.Id, ct);
+            if (scenarios.Any(s => s.ScenarioManagers.Any(m => string.Equals(m, user.Mail, StringComparison.OrdinalIgnoreCase))))
+            {
+                scenarioManagerWorkloadIds.Add(workload.Id);
+            }
+        }
+
+        var token = issuer.IssueToken(
+            user.ObjectId, user.Mail, user.PortalRoles, user.PlatformTenantId, scenarioManagerWorkloadIds);
+
+        return Results.Ok(new MockLoginResponse(token, user.Mail, user.PortalRoles, user.PlatformTenantId));
+    }).AllowAnonymous();
+
+    // JWT ist zustandslos — es gibt serverseitig nichts zu invalidieren (kein Token-Store,
+    // keine Revocation-Liste im MVP). Sign-out ist daher rein clientseitig (sessionStorage
+    // leeren, siehe AppLayout.tsx) und dieser Endpoint ist ein reiner No-op, der nur existiert
+    // damit der Client einen symmetrischen /login-/logout-Aufruf hat, falls spaeter serverseitige
+    // Token-Revocation noetig wird (z.B. bei echtem EntraId-Provider mit Refresh-Tokens).
+    app.MapPost("/api/auth/mock/logout", () => Results.Ok()).AllowAnonymous();
+}
 
 app.MapGet("/api/jobs/{id:guid}", async (
     Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
@@ -114,19 +246,143 @@ app.MapPost("/api/jobs/{id:guid}/stop", async (
     job.Status = JobStatus.Cancelled;
     job.LastError = $"Gestoppt durch {userCtx.Current.Mail}.";
     job.UpdatedAt = DateTimeOffset.UtcNow;
+    job.Log.Add(new JobLogEntry(job.UpdatedAt, JobStatus.Cancelled, job.LastError));
     await jobRepository.UpsertAsync(job, ct);
     await jobQueue.CancelAsync(id, ct);
 
     return Results.Ok(await ToJobStatusResponseAsync(tenantCtx.Current, job, workloadRepository, ct));
 });
 
-app.MapGet("/api/ui/configuration", (IPortalUserContextAccessor userCtx, IConfiguration configuration) =>
+// Erweiterung 2026-08-30 (Worker/Trigger-Uebersicht): Restart legt bewusst einen NEUEN Job
+// mit denselben Parametern an statt den bestehenden DirectoryOperation-Datensatz erneut zu
+// versuchen — der fehlgeschlagene Datensatz bleibt unveraendert als Historie/Audit-Spur
+// erhalten, der neue Job startet mit RetryCount 0 und eigener CorrelationId. Zugriff: dieselbe
+// Sichtbarkeitsregel wie beim Betrachten des Jobs (CanAccessJobAsync) reicht aus — wer den
+// fehlgeschlagenen Job sehen darf (Governance Admin oder Workload Owner des betroffenen
+// Workload), darf ihn auch neu anstossen; kein zusaetzliches Admin-Gate noetig.
+app.MapPost("/api/jobs/{id:guid}/restart", async (
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IJobRepository jobRepository, IWorkloadRepository workloadRepository,
+    ProvisioningService provisioningService, CancellationToken ct) =>
+{
+    var job = await jobRepository.GetAsync(tenantCtx.Current, id, ct);
+    if (job is null)
+    {
+        return Results.NotFound(new { error = $"Job {id} nicht gefunden." });
+    }
+
+    if (!await CanAccessJobAsync(userCtx.Current, tenantCtx.Current, job, workloadRepository, ct))
+    {
+        return Results.StatusCode(403);
+    }
+
+    if (job.Status is not (JobStatus.Failed or JobStatus.DeadLetter))
+    {
+        return Results.BadRequest(new { error = $"Job {id} ist im Status {job.Status} und kann nicht neu gestartet werden (nur Failed/DeadLetter)." });
+    }
+
+    if (job.PayloadJson is null)
+    {
+        return Results.BadRequest(new { error = $"Job {id} hat keinen gespeicherten Payload (vermutlich vor Einfuehrung von Restart erzeugt) und kann nicht neu gestartet werden." });
+    }
+
+    object payload = JsonSerializer.Deserialize<JsonElement>(job.PayloadJson);
+    var newJob = await provisioningService.EnqueueJobAsync(
+        job.PlatformTenantId,
+        job.DirectoryTenantId,
+        job.JobType,
+        job.EntityType,
+        job.EntityId,
+        job.DesiredStateHash,
+        payload,
+        correlationId: Guid.NewGuid(),
+        ct,
+        triggeredBy: $"Restart von {userCtx.Current.Mail} (Original: {job.Id})",
+        workloadId: job.WorkloadId);
+
+    return Results.Ok(await ToJobStatusResponseAsync(tenantCtx.Current, newJob, workloadRepository, ct));
+});
+
+// Erweiterung 2026-08-30: generische "Jetzt ausfuehren"-Trigger fuer Job-Typen ohne fachlichen
+// Kontext-Parameter (kein Guest/Workload/Role aus einem bestehenden Flow). RunDiscovery und
+// RunReconciliation hatten bisher UEBERHAUPT keinen Enqueue-Aufrufer im Code. Bewusst unter
+// /api/jobs/* (Erweiterung des bestehenden Jobs-Endpunkt-Blocks) statt /api/dev/* — Discovery/
+// Reconciliation sind echte Governance-Operationen (auch wenn aktuell nur Mock-Handler
+// existieren), kein LOCAL_MOCK-only Test-Tooling wie die /api/dev/seed/*-Endpunkte.
+app.MapPost("/api/jobs/trigger/discovery", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepository, ProvisioningService provisioningService, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var tenant = tenantCtx.Current;
+    var directoryTenantId = tenant.DirectoryTenantId ?? string.Empty;
+    var correlationId = Guid.NewGuid();
+    var hash = DesiredStateHasher.Hash("RunDiscovery", tenant.PlatformTenantId, directoryTenantId, correlationId.ToString());
+
+    // Discovery liest ueber IGuestDirectory tenant-weit alle Gaeste/Memberships (siehe
+    // DiscoveryHandler) — es gibt keine einzelne Zielentitaet, daher EntityType "Tenant" mit
+    // dem DirectoryTenantId als EntityId.
+    var job = await provisioningService.EnqueueJobAsync(
+        tenant.PlatformTenantId, tenant.DirectoryTenantId, JobTypes.RunDiscovery,
+        "Tenant", directoryTenantId, hash, new { }, correlationId, ct,
+        triggeredBy: userCtx.Current.Mail);
+
+    return Results.Ok(await ToJobStatusResponseAsync(tenant, job, workloadRepository, ct));
+});
+
+app.MapPost("/api/jobs/trigger/reconciliation", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IGuestAccountRepository guestRepository, IAssignmentRepository assignmentRepository,
+    IWorkloadRepository workloadRepository, ProvisioningService provisioningService, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var tenant = tenantCtx.Current;
+    // ReconciliationHandler vergleicht Desired-/Actual-State PRO GAST (job.Payload.GuestId) —
+    // anders als Discovery gibt es keinen tenant-weiten Reconciliation-Job. "Jetzt ausfuehren"
+    // bedeutet hier daher: fuer jeden Gast mit mindestens einer aktiven Zuweisung einen
+    // Reconciliation-Job einreihen (ein Sweep ueber den ganzen Tenant).
+    var guests = await guestRepository.ListAsync(tenant, ct);
+    var createdJobIds = new List<Guid>();
+    foreach (var guest in guests)
+    {
+        var activeAssignments = await assignmentRepository.ListActiveByGuestAsync(tenant, guest.Id, ct);
+        if (activeAssignments.Count == 0)
+        {
+            continue;
+        }
+
+        var correlationId = Guid.NewGuid();
+        var hash = DesiredStateHasher.Hash("RunReconciliation", guest.Id.ToString(), correlationId.ToString());
+        var job = await provisioningService.EnqueueJobAsync(
+            tenant.PlatformTenantId, tenant.DirectoryTenantId, JobTypes.RunReconciliation,
+            nameof(GuestAccount), guest.Id.ToString(), hash, new { GuestId = guest.Id }, correlationId, ct,
+            triggeredBy: userCtx.Current.Mail);
+        createdJobIds.Add(job.Id);
+    }
+
+    return Results.Ok(new { queuedJobCount = createdJobIds.Count, jobIds = createdJobIds });
+});
+
+// Bewusst ohne [Authorize]/AllowAnonymous-Zwang durch userCtx: die Login-Seite braucht
+// Theme/Branding, bevor ein Token existiert. user/platformTenantId sind nur gefuellt, wenn
+// ein gueltiges Bearer-Token vorliegt (kein Fallback auf einen Default-User mehr — genau das
+// war der urspruengliche Bug: stiller Re-Login nach Sign-out).
+app.MapGet("/api/ui/configuration", (HttpContext ctx, IPortalUserContextAccessor userCtx, IConfiguration configuration) =>
 {
     var themeId = configuration["DEFAULT_PORTAL_THEME_ID"] ?? "corporate-vibrant";
     if (mode == "LOCAL_MOCK")
     {
-        var headerThemeId = app.Services.GetRequiredService<IHttpContextAccessor>()
-            .HttpContext?.Request.Headers["X-Portal-Theme-Id"].FirstOrDefault();
+        // X-Portal-Theme-Id bleibt bewusst ein freier Header — reine UI-Praeferenz, kein
+        // Auth-/Identitaetsbezug (siehe docs/development/local-mock.md).
+        var headerThemeId = ctx.Request.Headers["X-Portal-Theme-Id"].FirstOrDefault();
         if (!string.IsNullOrWhiteSpace(headerThemeId))
         {
             themeId = headerThemeId;
@@ -144,20 +400,35 @@ app.MapGet("/api/ui/configuration", (IPortalUserContextAccessor userCtx, IConfig
         themeId = "corporate-vibrant";
     }
 
-    var user = userCtx.Current;
+    string? platformTenantId = null;
+    object? user = null;
+    if (ctx.User.Identity is { IsAuthenticated: true })
+    {
+        var current = userCtx.Current;
+        platformTenantId = app.Services.GetRequiredService<ITenantContextAccessor>().Current.PlatformTenantId;
+        user = new { current.Mail, roles = current.Roles };
+    }
+
     return Results.Ok(new
     {
-        platformTenantId = app.Services.GetRequiredService<IHttpContextAccessor>()
-            .HttpContext?.Request.Headers["X-Platform-Tenant-Id"].FirstOrDefault(),
+        platformTenantId,
         themeId,
         branding = new { productName = "B2B Guest Governance Portal" },
-        user = new { user.Mail, roles = user.Roles },
+        user,
     });
-});
+}).AllowAnonymous();
 
 // ---- Queries (Blueprint 16.1) --------------------------------------------
+// Erweiterung 2026-08-30 "Guest Pool Filter/Invitation Reminder": optionale Query-Parameter
+// workloadId/scenarioId/accountState/invitationStatus. Die Workload-/Szenario-Filterung laeuft
+// serverseitig ueber GuestWorkloadAssignment/WorkloadScenario (Join), statt den kompletten
+// Gast-/Assignment-Bestand an den Client zu schicken und dort clientseitig zu filtern (siehe
+// Aufgabenstellung "fuer Korrektheit/Effizienz bei Skalierung").
 app.MapGet("/api/guest-accounts", async (
-    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IGuestAccountRepository repo, CancellationToken ct) =>
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IGuestAccountRepository repo,
+    IAssignmentRepository assignmentRepo, IWorkloadScenarioRepository scenarioRepo,
+    Guid? workloadId, Guid? scenarioId, GuestAccountState? accountState, string? invitationStatus,
+    CancellationToken ct) =>
 {
     if (!userCtx.Current.IsGovernanceAdmin)
     {
@@ -165,7 +436,9 @@ app.MapGet("/api/guest-accounts", async (
     }
 
     var guests = await repo.ListAsync(tenantCtx.Current, ct);
-    return Results.Ok(guests);
+    var filtered = await FilterGuestsAsync(
+        tenantCtx.Current, guests, workloadId, scenarioId, accountState, invitationStatus, assignmentRepo, scenarioRepo, ct);
+    return Results.Ok(filtered);
 });
 
 app.MapGet("/api/guest-accounts/{id:guid}", async (
@@ -210,6 +483,48 @@ app.MapGet("/api/me/workloads", async (
     return Results.Ok(result);
 });
 
+// Erweiterung 2026-08-30 "Scoped Visibility fuer Workload-/Scenario-Owner": mirrort exakt die
+// Scoping-Logik von GET /api/workloads (CanManageWorkload ODER ScenarioManagerWorkloadIds),
+// NICHT GovernanceAdmin-only wie der volle Guest Pool (/api/guest-accounts). Liefert dieselbe
+// gefilterte Gaesteliste wie der Guest Pool, aber serverseitig auf die Workloads beschraenkt,
+// die der eingeloggte User selbst verwaltet — Grundlage fuer den neuen Abschnitt auf
+// MyWorkloadsPage.tsx.
+app.MapGet("/api/me/managed-guests", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepo, IGuestAccountRepository guestRepo, IAssignmentRepository assignmentRepo,
+    CancellationToken ct) =>
+{
+    var user = userCtx.Current;
+    if (!user.IsGovernanceAdmin && !user.HasRole(PortalRoles.WorkloadOwner) && !user.HasRole(PortalRoles.ScenarioManager))
+    {
+        return Results.Ok(Array.Empty<GuestAccount>());
+    }
+
+    var workloads = await workloadRepo.ListAsync(tenantCtx.Current, ct);
+    var managedWorkloadIds = workloads
+        .Where(w => user.CanManageWorkload(w.Owner) || user.ScenarioManagerWorkloadIds.Contains(w.Id))
+        .Select(w => w.Id)
+        .ToHashSet();
+    if (managedWorkloadIds.Count == 0)
+    {
+        return Results.Ok(Array.Empty<GuestAccount>());
+    }
+
+    var guestIds = new HashSet<Guid>();
+    foreach (var workloadId in managedWorkloadIds)
+    {
+        var assignments = await assignmentRepo.ListByWorkloadAsync(tenantCtx.Current, workloadId, ct);
+        foreach (var assignment in assignments)
+        {
+            guestIds.Add(assignment.GuestId);
+        }
+    }
+
+    var allGuests = await guestRepo.ListAsync(tenantCtx.Current, ct);
+    var scoped = allGuests.Where(g => guestIds.Contains(g.Id)).ToList();
+    return Results.Ok(scoped);
+});
+
 app.MapGet("/api/me/navigation", (IPortalUserContextAccessor userCtx) =>
 {
     var user = userCtx.Current;
@@ -220,7 +535,7 @@ app.MapGet("/api/me/navigation", (IPortalUserContextAccessor userCtx) =>
     }
     if (user.IsGovernanceAdmin)
     {
-        items.AddRange(["Übersicht", "Guest Pool", "Workloads", "Einladungen", "Reviews", "Zugriffsanträge", "Compliance", "Audit", "Ressourcen / Discovery", "Jobs", "Templates", "Konfiguration"]);
+        items.AddRange(["Übersicht", "Guest Pool", "Workloads", "Einladungen", "Reviews", "Zugriffsanträge", "Compliance", "Audit", "Ressourcen / Discovery", "Jobs", "Erinnerungs-Policy", "Mail Monitor", "Templates", "Konfiguration"]);
     }
     else if (user.HasRole(PortalRoles.WorkloadOwner) || user.HasRole(PortalRoles.ScenarioManager))
     {
@@ -478,7 +793,7 @@ app.MapPost("/api/workloads/{workloadId:guid}/resources", async (
         if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
 
         var resource = await service.UpsertResourceAsync(
-            tenantCtx.Current, workloadId, resourceId: null, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct);
+            tenantCtx.Current, workloadId, resourceId: null, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct, body.DisplayName);
         return Results.Ok(resource);
     }
     catch (InvalidOperationException ex)
@@ -498,7 +813,7 @@ app.MapPut("/api/workloads/{workloadId:guid}/resources/{resourceId:guid}", async
         if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
 
         var resource = await service.UpsertResourceAsync(
-            tenantCtx.Current, workloadId, resourceId, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct);
+            tenantCtx.Current, workloadId, resourceId, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct, body.DisplayName);
         return Results.Ok(resource);
     }
     catch (InvalidOperationException ex)
@@ -549,13 +864,45 @@ app.MapPost("/api/workloads/{workloadId:guid}/resources/attach", async (
         if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
 
         var resource = await service.AttachResourceAsync(
-            tenantCtx.Current, workloadId, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct);
+            tenantCtx.Current, workloadId, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct, body.DisplayName);
         return Results.Ok(resource);
     }
     catch (InvalidOperationException ex)
     {
         return Results.BadRequest(new { error = ex.Message });
     }
+});
+
+// Manueller Trigger fuer eine Discovery-Review (Erweiterung 2026-08-31 "Discovery-
+// Sichtbarkeit ueber Review"): reiht einen StartReview-Job mit Scope="discovery" ein
+// (siehe StartReviewHandler.StartDiscoveryReviewAsync) — nimmt ALLE tenant-weiten
+// Unclassified ResourceAccess-Eintraege als ReviewItems in eine neue ReviewInstance auf,
+// sichtbar unter GET /api/reviews wie jede andere Review. Aendert dabei nichts an
+// Assignments/Zugriffen (reiner Snapshot). ReviewDefinition wird nicht separat persistiert
+// (kein IReviewDefinitionRepository im Projekt) — die Id ist hier nur ein Korrelations-
+// Handle fuer die neue ReviewInstance, analog zum bestehenden Muster.
+app.MapPost("/api/reviews/trigger/discovery", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepository, ProvisioningService provisioningService, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var tenant = tenantCtx.Current;
+    var reviewDefinitionId = Guid.NewGuid();
+    var correlationId = Guid.NewGuid();
+    var hash = DesiredStateHasher.Hash("StartReview-discovery", tenant.PlatformTenantId, correlationId.ToString());
+
+    var job = await provisioningService.EnqueueJobAsync(
+        tenant.PlatformTenantId, tenant.DirectoryTenantId, JobTypes.StartReview,
+        "Tenant", tenant.DirectoryTenantId ?? string.Empty, hash,
+        new { ReviewDefinitionId = reviewDefinitionId, Scope = "discovery" },
+        correlationId, ct,
+        triggeredBy: userCtx.Current.Mail);
+
+    return Results.Ok(await ToJobStatusResponseAsync(tenant, job, workloadRepository, ct));
 });
 
 app.MapPost("/api/reviews/{reviewInstanceId:guid}/items/{reviewItemId:guid}/decision", async (
@@ -603,6 +950,86 @@ app.MapGet("/api/audit-events", async (
     return Results.Ok(events);
 });
 
+// ---- Reminder Policy (Erweiterung 2026-08-30 "Invitation Reminder Worker") -----------------
+// GovernanceAdmin-only Konfiguration der mehrstufigen Erinnerungs-Policy fuer offene
+// Einladungen — der periodische InvitationReminderWorker liest ausschliesslich diese Policy,
+// es gibt keine hartkodierten Default-Stufen.
+app.MapGet("/api/reminder-policy", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IReminderPolicyRepository repo, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var policy = await repo.GetAsync(tenantCtx.Current, ct);
+    return Results.Ok(policy ?? new ReminderPolicy { PlatformTenantId = tenantCtx.Current.PlatformTenantId });
+});
+
+app.MapPut("/api/reminder-policy", async (
+    UpdateReminderPolicyBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IReminderPolicyRepository repo, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var policy = new ReminderPolicy
+    {
+        PlatformTenantId = tenantCtx.Current.PlatformTenantId,
+        Stages =
+        [
+            .. body.Stages
+                .OrderBy(s => s.StageNumber)
+                .Select(s => new ReminderStage
+                {
+                    StageNumber = s.StageNumber,
+                    DaysAfterInvite = s.DaysAfterInvite,
+                    TemplateId = s.TemplateId,
+                    TemplateSubject = s.TemplateSubject,
+                    TemplateBody = s.TemplateBody,
+                }),
+        ],
+        UpdatedAt = DateTimeOffset.UtcNow,
+    };
+    await repo.UpsertAsync(policy, ct);
+    return Results.Ok(policy);
+});
+
+// Erweiterung 2026-08-30 (Teil 2 "Outlook-HTML-Templates"): rendert Betreff/Body EXAKT wie der
+// InvitationReminderHandler es beim echten Versand tut (derselbe OutlookHtmlEmailRenderer,
+// dieselbe Platzhalter-Ersetzung mit Beispieldaten statt echtem Gast) — GovernanceAdmin kann
+// so die Outlook-Kompatibilitaet pruefen, bevor eine Stufe gespeichert wird. Kein Versand,
+// keine Job-Erzeugung, rein lesend.
+app.MapPost("/api/reminder-policy/preview", (
+    ReminderStagePreviewBody body, IPortalUserContextAccessor userCtx) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    const string sampleDisplayName = "Anna Musterfrau";
+    const string sampleWorkloadName = "SAP S/4 Rollout";
+    const int sampleDaysSinceInvite = 7;
+    const string sampleRedemptionLink = "https://mock-invite.local/redeem/00000000-0000-0000-0000-000000000000";
+
+    string Render(string template, bool htmlEncode)
+    {
+        string Encode(string value) => htmlEncode ? System.Net.WebUtility.HtmlEncode(value) : value;
+        return template
+            .Replace("{{DisplayName}}", Encode(sampleDisplayName))
+            .Replace("{{WorkloadName}}", Encode(sampleWorkloadName))
+            .Replace("{{DaysSinceInvite}}", sampleDaysSinceInvite.ToString())
+            .Replace("{{RedemptionLink}}", sampleRedemptionLink);
+    }
+
+    var subject = Render(body.TemplateSubject, htmlEncode: false);
+    var renderedHtml = OutlookHtmlEmailRenderer.Render(subject, Render(body.TemplateBody, htmlEncode: true));
+    return Results.Ok(new ReminderStagePreviewResponse(subject, renderedHtml));
+});
+
 // ---- Commands (Blueprint 16.1) -------------------------------------------
 app.MapPost("/api/guests/invite", async (
     InviteGuestBody body, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, InviteGuestCommandHandler handler,
@@ -619,6 +1046,40 @@ app.MapPost("/api/guests/invite", async (
         body.Mail, body.DisplayName, Actor: userCtx.Current.Mail);
     var guest = await handler.HandleAsync(request, ct);
     return Results.Ok(guest);
+});
+
+// Erweiterung 2026-08-30 (Teil 3 "Manuelles Resend"): ResendInvitationHandler existierte
+// bereits (Handlers/Invitation/InvitationHandler.cs), hatte aber nirgends einen Trigger — nur
+// der automatische InvitationReminderWorker konnte bislang eine Erinnerung ausloesen. Admin
+// kann jetzt gezielt "jetzt nochmal einladen" fuer einen einzelnen Gast anstossen, unabhaengig
+// von der konfigurierten Reminder-Policy/Tagesschwelle.
+app.MapPost("/api/guest-accounts/{id:guid}/resend-invitation", async (
+    Guid id, ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IGuestAccountRepository guestRepo, ProvisioningService provisioningService, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var guest = await guestRepo.GetAsync(tenantCtx.Current, id, ct);
+    if (guest is null)
+    {
+        return Results.NotFound(new { error = $"Gast {id} nicht gefunden." });
+    }
+    if (string.IsNullOrWhiteSpace(guest.EntraObjectId))
+    {
+        return Results.BadRequest(new { error = "Gast wurde noch nicht eingeladen (keine EntraObjectId) — kein Resend moeglich." });
+    }
+
+    var correlationId = Guid.NewGuid();
+    var hash = DesiredStateHasher.Hash("ResendInvitation", guest.Id.ToString(), correlationId.ToString());
+    var job = await provisioningService.EnqueueJobAsync(
+        tenantCtx.Current.PlatformTenantId, tenantCtx.Current.DirectoryTenantId, JobTypes.ResendInvitation,
+        nameof(GuestAccount), guest.Id.ToString(), hash,
+        new { EntraObjectId = guest.EntraObjectId }, correlationId, ct, triggeredBy: userCtx.Current.Mail);
+
+    return Results.Ok(new { jobId = job.Id });
 });
 
 app.MapPost("/api/workloads/{workloadId:guid}/assignments", async (
@@ -985,14 +1446,145 @@ if (mode == "LOCAL_MOCK")
         return Results.Ok(store.ListUsers());
     });
 
+    // Worker-Steuerung (Erweiterung 2026-08-31 "Job/Worker-Audit — Worker-Steuerung"): die
+    // periodischen BackgroundServices (B2B.Portal.Worker) laufen unabhaengig vom API-Prozess;
+    // diese Endpoints lesen/schreiben ausschliesslich das persistierte WorkerControlState-
+    // Dokument (Container "jobs", siehe CosmosWorkerControlRepository) — der eigentliche
+    // Worker-Prozess liest denselben Zustand ueber PeriodicWorkerBase (Pause-Check vor jedem
+    // Tick, Trigger-Poll alle 5s). KnownWorkerNames haelt die feste Liste aller periodischen
+    // Worker, damit auch ein Worker ohne bisherigen Lauf (noch kein Cosmos-Dokument) in der
+    // Liste erscheint, statt schlicht zu fehlen.
+    // Namen als String-Literale statt nameof(...): B2B.Portal.Api referenziert B2B.Portal.Worker
+    // bewusst nicht (Composition-Root-Trennung, siehe AddB2BInfrastructure-Kommentar) — die
+    // Namen MUESSEN exakt mit den Klassennamen der BackgroundServices in B2B.Portal.Worker
+    // uebereinstimmen, da PeriodicWorkerBase dort nameof(<Klasse>) als WorkerName verwendet.
+    var knownWorkerNames = new[]
+    {
+        "ApplicationSignInSyncWorker", "InvitationReminderWorker",
+        "WorkloadPatternSyncWorker", "DiscoveryReconciliationWorker",
+    };
+
+    app.MapGet("/api/dev/workers", async (
+        IWorkerControlRepository workerControlRepo, IPortalUserContextAccessor userCtx, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var known = await workerControlRepo.ListAllAsync(ct);
+        var knownByName = known.ToDictionary(s => s.WorkerName, StringComparer.Ordinal);
+        var result = knownWorkerNames.Select(name =>
+            knownByName.TryGetValue(name, out var state)
+                ? state
+                : new WorkerControlState(name, false, null, null, null, null, null, null, null));
+        return Results.Ok(result);
+    });
+
+    app.MapPost("/api/dev/workers/{workerName}/pause", async (
+        string workerName, IWorkerControlRepository workerControlRepo, IPortalUserContextAccessor userCtx, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+        if (!knownWorkerNames.Contains(workerName, StringComparer.Ordinal))
+        {
+            return Results.NotFound(new { error = $"Unbekannter Worker '{workerName}'." });
+        }
+
+        var existing = await workerControlRepo.GetAsync(workerName, ct)
+            ?? new WorkerControlState(workerName, false, null, null, null, null, null, null, null);
+        var updated = existing with { IsPaused = true, PausedBy = userCtx.Current.Mail, PausedAt = DateTimeOffset.UtcNow };
+        await workerControlRepo.UpsertAsync(updated, ct);
+        return Results.Ok(updated);
+    });
+
+    app.MapPost("/api/dev/workers/{workerName}/resume", async (
+        string workerName, IWorkerControlRepository workerControlRepo, IPortalUserContextAccessor userCtx, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+        if (!knownWorkerNames.Contains(workerName, StringComparer.Ordinal))
+        {
+            return Results.NotFound(new { error = $"Unbekannter Worker '{workerName}'." });
+        }
+
+        var existing = await workerControlRepo.GetAsync(workerName, ct)
+            ?? new WorkerControlState(workerName, false, null, null, null, null, null, null, null);
+        var updated = existing with { IsPaused = false, PausedBy = null, PausedAt = null };
+        await workerControlRepo.UpsertAsync(updated, ct);
+        return Results.Ok(updated);
+    });
+
+    app.MapPost("/api/dev/workers/{workerName}/trigger", async (
+        string workerName, IWorkerControlRepository workerControlRepo, IPortalUserContextAccessor userCtx, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+        if (!knownWorkerNames.Contains(workerName, StringComparer.Ordinal))
+        {
+            return Results.NotFound(new { error = $"Unbekannter Worker '{workerName}'." });
+        }
+
+        var existing = await workerControlRepo.GetAsync(workerName, ct)
+            ?? new WorkerControlState(workerName, false, null, null, null, null, null, null, null);
+        if (existing.IsPaused)
+        {
+            return Results.Conflict(new { error = $"Worker '{workerName}' ist pausiert — erst fortsetzen (resume), dann triggern." });
+        }
+
+        var updated = existing with { TriggerRequestedAt = DateTimeOffset.UtcNow, TriggerRequestedBy = userCtx.Current.Mail };
+        await workerControlRepo.UpsertAsync(updated, ct);
+        return Results.Accepted(value: new
+        {
+            message = $"Trigger fuer '{workerName}' angefordert — wird innerhalb weniger Sekunden vom Worker-Prozess abgeholt.",
+            state = updated,
+        });
+    });
+
+    // Manueller Trigger fuer den periodischen Discovery-Abgleich (Erweiterung 2026-08-31
+    // "EntraId-Persistenz + Discovery-Reconciliation"): DiscoveryReconciliationWorker
+    // (B2B.Portal.Worker) laeuft alle 10 Minuten automatisch im Worker-Prozess und ist von
+    // dort nicht per HTTP erreichbar — dieser Endpoint fuehrt denselben Abgleich
+    // (MockEntraDirectoryStore.ReconcileWorkloadResourcesAsync: prueft ob alle von Workloads
+    // referenzierten Ressourcen im Mock-Entra-Verzeichnis noch existieren) synchron fuer den
+    // aktuellen Tenant aus und gibt das Ergebnis direkt zurueck, ohne auf den naechsten
+    // Worker-Zyklus warten zu muessen.
+    app.MapPost("/api/dev/discovery/reconcile", async (
+        ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+        MockEntraDirectoryStore mockEntraStore, IWorkloadRepository workloadRepo,
+        ILogger<Program> logger, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var missingCount = await mockEntraStore.ReconcileWorkloadResourcesAsync(tenantCtx.Current, workloadRepo, logger, ct);
+        return Results.Ok(new { tenantId = tenantCtx.Current.PlatformTenantId, missingResourceCount = missingCount });
+    });
+
     app.MapGet("/api/dev/mock-entra/login-users", async (
-        ITenantContextAccessor tenantCtx, MockEntraDirectoryStore store,
+        MockEntraDirectoryStore store,
         IGuestAccountRepository guestRepo, IWorkloadRepository workloadRepo, IAssignmentRepository assignmentRepo,
         CancellationToken ct) =>
     {
-        await HydrateMockEntraFromRepositoriesAsync(tenantCtx.Current, store, guestRepo, workloadRepo, assignmentRepo, ct);
+        // Muss vor dem Login erreichbar sein (Login-Screen listet hier die waehlbaren
+        // Mock-User auf) — daher AllowAnonymous und ohne ITenantContextAccessor (der ein
+        // gueltiges Token voraussetzt). Hydration laeuft je Tenant aus dem Mock-Stamm selbst,
+        // nicht mehr aus dem (vor Login nicht vorhandenen) Tenant-Kontext einer Request.
+        foreach (var tenantId in store.ListUsers().Select(u => u.PlatformTenantId).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            await HydrateMockEntraFromRepositoriesAsync(
+                B2B.Portal.Domain.ValueObjects.TenantContext.Create(tenantId), store, guestRepo, workloadRepo, assignmentRepo, ct);
+        }
         return Results.Ok(store.ListUsers());
-    });
+    }).AllowAnonymous();
 
     app.MapPost("/api/dev/mock-entra/users", (
         UpsertMockEntraUserBody body, IPortalUserContextAccessor userCtx, MockEntraDirectoryStore store) =>
@@ -1185,6 +1777,28 @@ if (mode == "LOCAL_MOCK")
         return Results.Ok(store.ListApplicationSignIns(appId));
     });
 
+    // Erweiterung 2026-08-30 "Mail Monitor": liest aus IMailSinkRepository (Cosmos), NICHT aus
+    // MockEmailProvider.Sink — der In-Memory-Sink ist prozesslokal, die meisten Mails
+    // (InvitationReminder) werden aber im separaten Worker-Prozess versendet und waeren im
+    // API-Prozess-Sink nie sichtbar (live beobachtet: Worker-Log zeigte erfolgreichen Versand,
+    // dieser Endpoint lieferte trotzdem [] — siehe MockEmailProvider-Klassenkommentar).
+    // GovernanceAdmin-only, LOCAL_MOCK-only wie alle uebrigen /api/dev/*-Endpunkte.
+    app.MapGet("/api/dev/mail-sink", async (
+        ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx, IMailSinkRepository mailSinkRepository, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var entries = (await mailSinkRepository.ListAsync(tenantCtx.Current, take: 200, ct))
+            .Select(entry => new MailSinkEntryDto(
+                entry.Message.SenderMailbox, entry.Message.RecipientMail, entry.Message.TemplateId,
+                entry.Message.CorrelationId, entry.Message.WorkloadContext, entry.Message.TemplateData, entry.SentAt))
+            .ToList();
+        return Results.Ok(entries);
+    });
+
     app.MapPost("/api/dev/seed/large-workload", async (
         SeedLargeWorkloadBody? body, ITenantContextAccessor tenantCtx,
         IWorkloadRepository workloadRepo, IGuestAccountRepository guestRepo,
@@ -1198,23 +1812,20 @@ if (mode == "LOCAL_MOCK")
         var correlationId = Guid.NewGuid();
 
         var workload = DevSeedData.BuildWorkload(tenantId, body?.WorkloadName);
-        await workloadRepo.UpsertAsync(workload, ct);
         var defaultWorkload = DevSeedData.BuildDefaultWorkload(tenantId);
+        // EnsureGroup sucht/erstellt per DisplayName und liefert die stabile ObjectId zurueck —
+        // die schreiben wir jetzt auf ExternalId zurueck (vorher blieb ExternalId der
+        // hartcodierte Name aus DevSeedData, siehe WorkloadResource-Kommentar: ExternalId muss
+        // immer die ObjectId sein, DisplayName der Anzeigename).
+        foreach (var resource in workload.Resources.Where(r => MockEntraDirectoryStore.IsMockEntraGroupResource(r) && r.DisplayName is not null))
+        {
+            resource.ExternalId = mockEntraStore.EnsureGroup(
+                resource.ResourceType,
+                resource.DisplayName!,
+                new Dictionary<string, string> { ["ResourceType"] = resource.ResourceType });
+        }
+        await workloadRepo.UpsertAsync(workload, ct);
         await workloadRepo.UpsertAsync(defaultWorkload, ct);
-        foreach (var resource in workload.Resources.Where(r => IsMockEntraGroupResource(r) && r.ExternalId is not null))
-        {
-            mockEntraStore.EnsureGroup(
-                resource.ResourceType,
-                resource.ExternalId!,
-                new Dictionary<string, string> { ["ResourceType"] = resource.ResourceType });
-        }
-        foreach (var resource in defaultWorkload.Resources.Where(r => IsMockEntraGroupResource(r) && r.ExternalId is not null))
-        {
-            mockEntraStore.EnsureGroup(
-                resource.ResourceType,
-                resource.ExternalId!,
-                new Dictionary<string, string> { ["ResourceType"] = resource.ResourceType });
-        }
         foreach (var group in mockEntraStore.ListGroups())
         {
             if (DevSeedData.MatchesAnyPattern(group.DisplayName, defaultWorkload.ResourceNamePatterns))
@@ -1223,7 +1834,8 @@ if (mode == "LOCAL_MOCK")
                 {
                     WorkloadId = defaultWorkload.Id,
                     ResourceType = group.ResourceProvisioningOptions.Contains("Team") ? "Team" : group.GroupTypes.Contains("Unified") ? "M365Group" : "SecurityGroup",
-                    ExternalId = group.DisplayName,
+                    ExternalId = group.ObjectId,
+                    DisplayName = group.DisplayName,
                     Managed = false,
                 });
             }
@@ -1443,6 +2055,64 @@ static Guid? ResolveJobWorkloadId(DirectoryOperation job)
         : null;
 }
 
+/// <summary>
+/// Serverseitige Filterung fuer GET /api/guest-accounts (Erweiterung 2026-08-30 "Guest Pool
+/// Filter"). workloadId/scenarioId werden ueber GuestWorkloadAssignment/WorkloadScenario
+/// aufgeloest (ein Szenario selbst haengt an keinem Assignment — Filterung erfolgt daher ueber
+/// die WorkloadRole-Zuordnung des Szenarios, analog zu /scenarios/{id}/users). invitationStatus
+/// ist "accepted" (jeder State ausser Invited) oder "pending" (State == Invited) — abgeleitet
+/// aus dem bestehenden GuestAccountState statt eines eigenen Feldes (siehe
+/// GuestAccount.TransitionTo).
+/// </summary>
+static async Task<IReadOnlyList<GuestAccount>> FilterGuestsAsync(
+    B2B.Portal.Domain.ValueObjects.TenantContext tenant,
+    IReadOnlyList<GuestAccount> guests,
+    Guid? workloadId,
+    Guid? scenarioId,
+    GuestAccountState? accountState,
+    string? invitationStatus,
+    IAssignmentRepository assignmentRepo,
+    IWorkloadScenarioRepository scenarioRepo,
+    CancellationToken ct)
+{
+    IEnumerable<GuestAccount> result = guests;
+
+    if (accountState is not null)
+    {
+        result = result.Where(g => g.AccountState == accountState);
+    }
+
+    if (!string.IsNullOrWhiteSpace(invitationStatus))
+    {
+        var pending = string.Equals(invitationStatus, "pending", StringComparison.OrdinalIgnoreCase);
+        result = pending
+            ? result.Where(g => g.AccountState == GuestAccountState.Invited)
+            : result.Where(g => g.AccountState != GuestAccountState.Invited);
+    }
+
+    if (scenarioId is not null)
+    {
+        // Szenario -> Workload -> betroffene Rollen (ResourceMappings ueberschneiden sich mit
+        // den ScenarioResourceRules) -> Gaeste mit einem Assignment auf einer dieser Rollen.
+        var scenario = await scenarioRepo.GetAsync(tenant, scenarioId.Value, ct);
+        if (scenario is null)
+        {
+            return [];
+        }
+        var scenarioAssignments = await assignmentRepo.ListByWorkloadAsync(tenant, scenario.WorkloadId, ct);
+        var scenarioGuestIds = scenarioAssignments.Select(a => a.GuestId).ToHashSet();
+        result = result.Where(g => scenarioGuestIds.Contains(g.Id));
+    }
+    else if (workloadId is not null)
+    {
+        var workloadAssignments = await assignmentRepo.ListByWorkloadAsync(tenant, workloadId.Value, ct);
+        var workloadGuestIds = workloadAssignments.Select(a => a.GuestId).ToHashSet();
+        result = result.Where(g => workloadGuestIds.Contains(g.Id));
+    }
+
+    return result.ToList();
+}
+
 static async Task<JobStatusResponse> ToJobStatusResponseAsync(
     B2B.Portal.Domain.ValueObjects.TenantContext tenant,
     DirectoryOperation job,
@@ -1460,9 +2130,20 @@ static async Task<JobStatusResponse> ToJobStatusResponseAsync(
     return new JobStatusResponse(
         job.Id, job.JobType, job.EntityType, job.EntityId,
         job.TriggeredBy, workloadId, workloadName,
-        job.Status.ToString(), job.RetryCount, job.LastError, job.CreatedAt, job.UpdatedAt);
+        job.Status.ToString(), job.RetryCount, job.LastError, job.CreatedAt, job.UpdatedAt,
+        [.. job.Log.Select(l => new JobLogEntryResponse(l.Timestamp, l.Status.ToString(), l.Message))]);
 }
 
+/// <summary>
+/// Haelt den Mock-Entra-Store fuer einen Tenant aktuell, bevor Endpunkte darauf lesen
+/// (/api/dev/mock-entra/*, Szenario-Diff): synct GuestAccounts als MockEntraUser (Erweiterung
+/// 2026-08-30 (Teil 3)) und Application-Sign-ins fuer aktive Assignments, und prueft
+/// zusaetzlich per ReconcileWorkloadResourcesAsync, ob alle von Workloads referenzierten
+/// Ressourcen im (dedizierten Container "entraid" persistierten) Verzeichnis noch bekannt
+/// sind. Anders als vor Erweiterung 2026-08-31 ("EntraId-Persistenz + Discovery-
+/// Reconciliation") werden fehlende Gruppen NICHT mehr automatisch nachgebaut — siehe
+/// Kommentar an MockEntraDirectoryStore.ReconcileWorkloadResourcesAsync.
+/// </summary>
 static async Task HydrateMockEntraFromRepositoriesAsync(
     B2B.Portal.Domain.ValueObjects.TenantContext tenant,
     MockEntraDirectoryStore mockEntraStore,
@@ -1483,12 +2164,9 @@ static async Task HydrateMockEntraFromRepositoriesAsync(
     var workloads = await workloadRepo.ListAsync(tenant, ct);
     foreach (var workload in workloads)
     {
-        foreach (var resource in workload.Resources.Where(r => IsMockEntraGroupResource(r) && !string.IsNullOrWhiteSpace(r.ExternalId)))
+        if (string.IsNullOrWhiteSpace(workload.ApplicationExternalId))
         {
-            mockEntraStore.EnsureGroup(
-                resource.ResourceType,
-                resource.ExternalId!,
-                new Dictionary<string, string> { ["ResourceType"] = resource.ResourceType, ["WorkloadId"] = workload.Id.ToString() });
+            continue;
         }
 
         var assignments = await assignmentRepo.ListByWorkloadAsync(tenant, workload.Id, ct);
@@ -1499,38 +2177,19 @@ static async Task HydrateMockEntraFromRepositoriesAsync(
                 continue;
             }
 
-            if (!string.IsNullOrWhiteSpace(workload.ApplicationExternalId)
-                && mockEntraStore.ListApplicationSignIns(workload.ApplicationExternalId)
-                    .All(s => !string.Equals(s.EntraObjectId, entraObjectId, StringComparison.OrdinalIgnoreCase)))
+            if (mockEntraStore.ListApplicationSignIns(workload.ApplicationExternalId)
+                .All(s => !string.Equals(s.EntraObjectId, entraObjectId, StringComparison.OrdinalIgnoreCase)))
             {
                 mockEntraStore.UpsertApplicationSignIn(
                     workload.ApplicationExternalId,
                     entraObjectId,
                     DateTimeOffset.UtcNow.AddDays(-Math.Abs(assignment.Id.GetHashCode() % 90)));
             }
-
-            var role = workload.Roles.FirstOrDefault(r => r.Id == assignment.RoleId);
-            if (role is null)
-            {
-                continue;
-            }
-
-            var groupResources = workload.Resources
-                .Where(r => role.ResourceMappings.Contains(r.Id))
-                .Where(IsMockEntraGroupResource)
-                .Where(r => !string.IsNullOrWhiteSpace(r.ExternalId));
-            foreach (var resource in groupResources)
-            {
-                mockEntraStore.AddMember(resource.ExternalId!, entraObjectId);
-            }
         }
     }
-}
 
-static bool IsMockEntraGroupResource(WorkloadResource resource) =>
-    resource.ResourceType.Equals("SecurityGroup", StringComparison.OrdinalIgnoreCase)
-    || resource.ResourceType.Equals("M365Group", StringComparison.OrdinalIgnoreCase)
-    || resource.ResourceType.Equals("Team", StringComparison.OrdinalIgnoreCase);
+    await mockEntraStore.ReconcileWorkloadResourcesAsync(tenant, workloadRepo, logger: null, ct);
+}
 
 static MockEntraUser ToMockEntraUser(UpsertMockEntraUserBody body)
 {
@@ -1549,7 +2208,8 @@ static MockEntraUser ToMockEntraUser(UpsertMockEntraUserBody body)
         body.AccountEnabled ?? "true",
         body.UserType ?? "Guest",
         body.PortalRoles ?? ["User"],
-        body.LastLoginAt);
+        body.LastLoginAt,
+        body.PlatformTenantId ?? "dev-tenant-a");
 }
 
 static MockEntraGroup ToMockEntraGroup(UpsertMockEntraGroupBody body) => new(
@@ -1597,7 +2257,9 @@ public sealed record JobStatusResponse(
     int RetryCount,
     string? LastError,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    IReadOnlyList<JobLogEntryResponse> Log);
+public sealed record JobLogEntryResponse(DateTimeOffset Timestamp, string Status, string? Message);
 public sealed record WorkloadMutationResponse(Workload Workload, Guid? PatternSyncJobId);
 public sealed record UpsertMockEntraUserBody(
     string? ObjectId,
@@ -1613,7 +2275,12 @@ public sealed record UpsertMockEntraUserBody(
     string? AccountEnabled,
     string? UserType,
     List<string>? PortalRoles,
-    DateTimeOffset? LastLoginAt);
+    DateTimeOffset? LastLoginAt,
+    string? PlatformTenantId);
+
+public sealed record MockLoginRequest(string Mail);
+
+public sealed record MockLoginResponse(string Token, string Mail, IReadOnlyList<string> Roles, string PlatformTenantId);
 public sealed record UpsertMockEntraGroupBody(
     string? ObjectId,
     string DisplayName,
@@ -1648,8 +2315,32 @@ public sealed record UpsertWorkloadRoleBody(
     string? ApplicationId,
     string? ApplicationRoleId,
     List<Guid> ResourceMappings);
-public sealed record UpsertWorkloadResourceBody(string ResourceType, string? ExternalId);
-public sealed record AttachWorkloadResourceBody(string ResourceType, string ExternalId);
+public sealed record UpsertWorkloadResourceBody(string ResourceType, string? ExternalId, string? DisplayName = null);
+public sealed record AttachWorkloadResourceBody(string ResourceType, string ExternalId, string? DisplayName = null);
+
+/// <summary>Body fuer PUT /api/reminder-policy (Erweiterung 2026-08-30 "Invitation Reminder
+/// Worker") — die komplette geordnete Stufenliste wird ersetzt (kein partielles Patchen
+/// einzelner Stufen, analog zu ResourceNamePatterns bei UpdateWorkloadBody).</summary>
+public sealed record ReminderStageBody(
+    int StageNumber, int DaysAfterInvite, string TemplateId, string TemplateSubject, string TemplateBody);
+public sealed record UpdateReminderPolicyBody(List<ReminderStageBody> Stages);
+
+/// <summary>Body/Antwort fuer POST /api/reminder-policy/preview (Erweiterung 2026-08-30 (Teil 2)
+/// "Outlook-HTML-Templates") — TemplateBody wird mit Beispieldaten gerendert und in dasselbe
+/// Outlook-Geruest gewrappt wie beim echten Versand.</summary>
+public sealed record ReminderStagePreviewBody(string TemplateSubject, string TemplateBody);
+public sealed record ReminderStagePreviewResponse(string RenderedSubject, string RenderedHtml);
+
+/// <summary>Antwort-DTO fuer GET /api/dev/mail-sink (Erweiterung 2026-08-30 "Mail Monitor") —
+/// EmailMessage selbst bleibt unveraendert, SentAt kommt aus MockEmailProvider.SinkWithTimestamps.</summary>
+public sealed record MailSinkEntryDto(
+    string SenderMailbox,
+    string RecipientMail,
+    string TemplateId,
+    Guid CorrelationId,
+    string? WorkloadContext,
+    IReadOnlyDictionary<string, string> TemplateData,
+    DateTimeOffset SentAt);
 
 /// <summary>JSON-Form des GuestImportColumnMapping für den multipart-Formularfeld
 /// "mapping" — ColumnToField kommt als Dictionary&lt;string,string&gt; über JSON (Spalten-
@@ -1711,13 +2402,19 @@ public static class DevSeedData
         };
         workload.ResourceNamePatterns.AddRange(["SG-MERIDIAN-*", "GRP-MERIDIAN-*", "TEAM-MERIDIAN-*"]);
 
+        // ExternalId bleibt hier bewusst leer: diese Seed-Ressourcen haben noch keine
+        // Entra-Object-ID, bis /api/dev/seed/large-workload sie ueber
+        // MockEntraDirectoryStore.EnsureGroup anlegt und die zurueckgegebene ObjectId
+        // zurueckschreibt (siehe dortiger Aufrufer). DisplayName traegt den Namen, der bisher
+        // hier in ExternalId stand (siehe WorkloadResource-Kommentar: ExternalId = ObjectId,
+        // DisplayName = Anzeigename).
         var resources = new[]
         {
-            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "SG-MERIDIAN-READ", Managed = true },
-            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "SG-MERIDIAN-CONTRIBUTE", Managed = true },
-            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "M365Group", ExternalId = "GRP-MERIDIAN-COLLAB", Managed = true },
-            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "Team", ExternalId = "TEAM-MERIDIAN-CORE", Managed = true },
-            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "AppRole", ExternalId = "APP-MERIDIAN-ADMIN", Managed = false },
+            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", DisplayName = "SG-MERIDIAN-READ", Managed = true },
+            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", DisplayName = "SG-MERIDIAN-CONTRIBUTE", Managed = true },
+            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "M365Group", DisplayName = "GRP-MERIDIAN-COLLAB", Managed = true },
+            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "Team", DisplayName = "TEAM-MERIDIAN-CORE", Managed = true },
+            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "AppRole", ExternalId = "APP-MERIDIAN-ADMIN", DisplayName = "APP-MERIDIAN-ADMIN", Managed = false },
         };
         workload.Resources.AddRange(resources);
 

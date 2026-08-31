@@ -15,7 +15,7 @@ public sealed class SyncWorkloadPatternResourcesHandler(
 {
     public string JobType => JobTypes.SyncWorkloadPatternResources;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var workloadId = Guid.Parse(job.EntityId);
         var actor = job.Payload.TryGetProperty("Actor", out var actorValue)
@@ -32,11 +32,11 @@ public sealed class SyncWorkloadPatternResourcesHandler(
         if (patterns.Count == 0)
         {
             logger.LogInformation("Pattern-Sync fuer Workload {WorkloadId}: keine Pattern hinterlegt.", workloadId);
-            return;
+            return $"Workload {workloadId}: keine ResourceNamePatterns hinterlegt — nichts abgeglichen.";
         }
 
         var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
-        var attached = 0;
+        var attachedNames = new List<string>();
         foreach (var group in mockEntraStore.ListGroups().Where(g => MatchesAnyPattern(g.DisplayName, patterns)))
         {
             var resourceType = group.ResourceProvisioningOptions.Contains("Team", StringComparer.OrdinalIgnoreCase)
@@ -45,13 +45,16 @@ public sealed class SyncWorkloadPatternResourcesHandler(
                     ? "M365Group"
                     : "SecurityGroup";
 
-            await workloadService.AttachResourceAsync(tenant, workloadId, resourceType, group.DisplayName, actor, ct);
-            attached++;
+            await workloadService.AttachResourceAsync(tenant, workloadId, resourceType, group.ObjectId, actor, ct, group.DisplayName);
+            attachedNames.Add($"{resourceType}:{group.DisplayName}");
         }
 
         logger.LogInformation(
             "Pattern-Sync fuer Workload {WorkloadId} abgeschlossen: {Count} Gruppe(n) abgeglichen. CorrelationId={CorrelationId}",
-            workloadId, attached, job.CorrelationId);
+            workloadId, attachedNames.Count, job.CorrelationId);
+
+        return $"Pattern [{string.Join(", ", patterns)}] gegen Mock-Entra-Verzeichnis abgeglichen: " +
+            $"{attachedNames.Count} Gruppe(n) am Workload {(attachedNames.Count > 0 ? $"[{string.Join(", ", attachedNames)}]" : "")}.";
     }
 
     private static bool MatchesAnyPattern(string value, IEnumerable<string> patterns) =>

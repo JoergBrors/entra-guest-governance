@@ -1,4 +1,5 @@
 using B2B.Portal.Application.Ports;
+using B2B.Portal.Infrastructure.Auth;
 using B2B.Portal.Infrastructure.Data;
 using B2B.Portal.Infrastructure.Data.Cosmos;
 using B2B.Portal.Infrastructure.Directory;
@@ -18,59 +19,67 @@ namespace B2B.Portal.Infrastructure;
 /// </summary>
 public static class InfrastructureServiceCollectionExtensions
 {
+    /// <param name="identityProviderConfig">
+    /// WICHTIG: wird vom Aufrufer (Program.cs) exakt einmal per FromConfiguration(...)
+    /// erzeugt und hier NICHT erneut berechnet — sonst wuerden bei fehlendem
+    /// JWT_SIGNING_KEY zwei unterschiedliche Dev-Ephemeral-Keys entstehen (einer fuer die
+    /// JwtBearer-Validierung in Program.cs, einer fuer MockJwtIssuer hier), und jedes
+    /// ausgestellte Token wuerde als ungueltig zurueckgewiesen.
+    /// </param>
     public static IServiceCollection AddB2BInfrastructure(
-        this IServiceCollection services, IConfiguration configuration)
+        this IServiceCollection services, IConfiguration configuration, IdentityProviderConfig identityProviderConfig)
     {
         var mode = configuration["B2B_MODE"] ?? "LOCAL_MOCK";
         var directoryProvider = configuration["DIRECTORY_PROVIDER"] ?? "mock";
         var emailProvider = configuration["EMAIL_PROVIDER"] ?? "mock";
-        // LOCAL_MOCK laeuft standardmaessig bereits vollstaendig gegen den lokalen Cosmos DB
-        // Emulator (nicht nur InMemory) — "mock" bezieht sich auf Directory/Email (keine
-        // echten Graph-/Mail-Schreibzugriffe), nicht auf die Datenhaltung selbst. Ein
-        // Emulator muss dafuer laufen (scripts/requirements.ps1 -InitCosmosEmulator).
-        // DATA_PROVIDER=local kann weiterhin explizit gesetzt werden, um ohne Emulator zu
-        // arbeiten (z. B. schnelle Unit-artige manuelle Tests ohne laufenden Emulator).
-        var dataProviderDefault = mode.Equals("LOCAL_MOCK", StringComparison.OrdinalIgnoreCase)
-            ? "cosmos" : "local";
-        var dataProvider = configuration["DATA_PROVIDER"] ?? dataProviderDefault;
         var allowGraphWrites = bool.TryParse(configuration["ALLOW_GRAPH_WRITES"], out var g) && g;
 
         services.AddSingleton<IClock, SystemClock>();
         services.AddSingleton<ISpreadsheetReader, ClosedXmlSpreadsheetReader>();
-        services.AddSingleton<MockEntraDirectoryStore>();
 
-        // "cosmos" (Default unter LOCAL_MOCK) nutzt den lokalen Cosmos DB Emulator (siehe
+        // Identity Provider (Erweiterung 2026-08-30: Ablösung der freien X-Portal-*-Header
+        // durch JWT). EntraIdMock ist unter LOCAL_MOCK der Default, EntraId bleibt ein reiner
+        // Konfigurations-Platzhalter (integration pending, siehe IdentityProviderConfig.cs).
+        if (identityProviderConfig.Kind == IdentityProviderKind.EntraIdMock
+            && identityProviderConfig.JwtSigningKey.StartsWith("dev-ephemeral-", StringComparison.Ordinal))
+        {
+            Console.WriteLine(
+                "[B2B.Portal.Infrastructure] WARNUNG: JWT_SIGNING_KEY nicht gesetzt — " +
+                "verwende einen zufaelligen, nur fuer diesen Prozess gueltigen Dev-Key. " +
+                "NIEMALS als echtes Secret verwenden, siehe .env.example.");
+        }
+        services.AddSingleton(identityProviderConfig);
+        services.AddSingleton<MockJwtIssuer>();
+
+        // Cosmos DB ist der einzige Datenprovider (Erweiterung 2026-08-30 (Teil 2): InMemory-
+        // Repositories entfernt). Nutzt den lokalen Cosmos DB Emulator (siehe
         // scripts/requirements.ps1 -InitCosmosEmulator) oder eine echte Cosmos-DB in
         // DEV_INTEGRATION/AZURE_DEV — Container-/Datenbanknamen siehe
-        // infra/modules/cosmos-free-tier.bicep. "local" ist der explizite Opt-out auf
-        // InMemory (kein Emulator noetig).
-        if (dataProvider.Equals("cosmos", StringComparison.OrdinalIgnoreCase))
-        {
-            services.AddSingleton<CosmosClientFactory>();
-            services.AddSingleton<IJobQueue, CosmosJobQueue>();
-            services.AddSingleton<IGuestAccountRepository, CosmosGuestAccountRepository>();
-            services.AddSingleton<IWorkloadRepository, CosmosWorkloadRepository>();
-            services.AddSingleton<IAssignmentRepository, CosmosAssignmentRepository>();
-            services.AddSingleton<IReviewRepository, CosmosReviewRepository>();
-            services.AddSingleton<IJobRepository, CosmosJobRepository>();
-            services.AddSingleton<IResourceAccessRepository, CosmosResourceAccessRepository>();
-            services.AddSingleton<IAuditWriter, CosmosAuditWriter>();
-            services.AddSingleton<IWorkloadScenarioRepository, CosmosWorkloadScenarioRepository>();
-            services.AddSingleton<IExternalOrganizationRepository, CosmosExternalOrganizationRepository>();
-        }
-        else
-        {
-            services.AddSingleton<IJobQueue, LocalJobQueue>();
-            services.AddSingleton<IGuestAccountRepository, InMemoryGuestAccountRepository>();
-            services.AddSingleton<IWorkloadRepository, InMemoryWorkloadRepository>();
-            services.AddSingleton<IAssignmentRepository, InMemoryAssignmentRepository>();
-            services.AddSingleton<IReviewRepository, InMemoryReviewRepository>();
-            services.AddSingleton<IJobRepository, InMemoryJobRepository>();
-            services.AddSingleton<IResourceAccessRepository, InMemoryResourceAccessRepository>();
-            services.AddSingleton<IAuditWriter, InMemoryAuditWriter>();
-            services.AddSingleton<IWorkloadScenarioRepository, InMemoryWorkloadScenarioRepository>();
-            services.AddSingleton<IExternalOrganizationRepository, InMemoryExternalOrganizationRepository>();
-        }
+        // infra/modules/cosmos-free-tier.bicep. "mock" (DIRECTORY_PROVIDER/EMAIL_PROVIDER)
+        // bezieht sich weiterhin nur auf Directory/Email, nicht auf die Datenhaltung.
+        services.AddSingleton<CosmosClientFactory>();
+        services.AddSingleton<IJobQueue, CosmosJobQueue>();
+        services.AddSingleton<IGuestAccountRepository, CosmosGuestAccountRepository>();
+        services.AddSingleton<IWorkloadRepository, CosmosWorkloadRepository>();
+        services.AddSingleton<IAssignmentRepository, CosmosAssignmentRepository>();
+        services.AddSingleton<IReviewRepository, CosmosReviewRepository>();
+        services.AddSingleton<IJobRepository, CosmosJobRepository>();
+        services.AddSingleton<IResourceAccessRepository, CosmosResourceAccessRepository>();
+        services.AddSingleton<IAuditWriter, CosmosAuditWriter>();
+        services.AddSingleton<IWorkloadScenarioRepository, CosmosWorkloadScenarioRepository>();
+        services.AddSingleton<IExternalOrganizationRepository, CosmosExternalOrganizationRepository>();
+        services.AddSingleton<IMockEntraUserRepository, CosmosMockEntraUserRepository>();
+        services.AddSingleton<IMockEntraDirectoryRepository, CosmosMockEntraDirectoryRepository>();
+        services.AddSingleton<IReminderPolicyRepository, CosmosReminderPolicyRepository>();
+        services.AddSingleton<IMailSinkRepository, CosmosMailSinkRepository>();
+        services.AddSingleton<IWorkerControlRepository, CosmosWorkerControlRepository>();
+
+        // Nimmt IMockEntraUserRepository als optionale Abhaengigkeit (siehe MockGuestDirectory.cs)
+        // fuer Persistenz von PortalRoles und Startup-Hydration (Program.cs ruft
+        // HydrateFromRepositoryAsync beim Start auf, siehe dortiger LOCAL_MOCK-Block).
+        services.AddSingleton(sp => new MockEntraDirectoryStore(
+            sp.GetRequiredService<IMockEntraUserRepository>(),
+            sp.GetRequiredService<IMockEntraDirectoryRepository>()));
 
         if (directoryProvider.Equals("graph", StringComparison.OrdinalIgnoreCase) && mode != "LOCAL_MOCK")
         {

@@ -12,21 +12,44 @@ namespace B2B.Portal.Worker.Handlers.Reviews;
 /// (Blueprint 13.2 "Interne Review Engine"). Ein laufender ReviewInstance wechselt
 /// seinen Provider nicht nachträglich (Anhang A, Regel 11) — Provider wird beim Start
 /// fixiert.
+///
+/// Zwei Modi ueber das Payload (Erweiterung 2026-08-31 "Discovery-Sichtbarkeit ueber
+/// Review"): Payload mit "GuestId" -&gt; klassischer Assignment-Review (ein Gast, dessen
+/// aktive Zuweisungen geprueft werden sollen). Payload mit "Scope": "discovery" (kein
+/// GuestId) -&gt; Discovery-Review: nimmt ALLE tenant-weiten Unclassified ResourceAccess als
+/// ReviewItems auf (WorkloadResource.ExternalId wird gegen ResourceAccess.ExternalResourceId
+/// gematcht, um in der Reason den betroffenen Workload zu nennen, falls bekannt) — macht
+/// Blueprint-12-Drift ("Nutzer ist tatsaechlich Mitglied einer Gruppe, aber keine formale
+/// Workload-Zuweisung existiert dafuer") sichtbar, OHNE selbst irgendetwas zu aendern (reiner
+/// Snapshot, wie der bestehende Assignment-Pfad auch).
 /// </summary>
 public sealed class StartReviewHandler(
     IReviewRepository reviewRepository,
     IAssignmentRepository assignmentRepository,
+    IResourceAccessRepository resourceAccessRepository,
+    IWorkloadRepository workloadRepository,
     ILogger<StartReviewHandler> logger) : IJobHandler
 {
     public string JobType => JobTypes.StartReview;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var reviewDefinitionId = job.Payload.GetProperty("ReviewDefinitionId").GetGuid();
-        var guestId = job.Payload.GetProperty("GuestId").GetGuid();
+        var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
 
-        var assignments = await assignmentRepository.ListActiveByGuestAsync(
-            TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), guestId, ct);
+        var isDiscoveryReview = job.Payload.TryGetProperty("Scope", out var scopeValue)
+            && string.Equals(scopeValue.GetString(), "discovery", StringComparison.OrdinalIgnoreCase);
+
+        return isDiscoveryReview
+            ? await StartDiscoveryReviewAsync(tenant, reviewDefinitionId, job, ct)
+            : await StartAssignmentReviewAsync(tenant, reviewDefinitionId, job, ct);
+    }
+
+    private async Task<string?> StartAssignmentReviewAsync(
+        TenantContext tenant, Guid reviewDefinitionId, JobEnvelope job, CancellationToken ct)
+    {
+        var guestId = job.Payload.GetProperty("GuestId").GetGuid();
+        var assignments = await assignmentRepository.ListActiveByGuestAsync(tenant, guestId, ct);
 
         var instance = new ReviewInstance
         {
@@ -49,36 +72,117 @@ public sealed class StartReviewHandler(
         logger.LogInformation(
             "Review {ReviewInstanceId} gestartet mit {ItemCount} Items. CorrelationId={CorrelationId}",
             instance.Id, instance.Items.Count, job.CorrelationId);
+
+        return $"Review {instance.Id} gestartet fuer ReviewDefinition {reviewDefinitionId}, Guest {guestId}: " +
+            $"{instance.Items.Count} Assignment(s) als Items aufgenommen.";
+    }
+
+    private async Task<string?> StartDiscoveryReviewAsync(
+        TenantContext tenant, Guid reviewDefinitionId, JobEnvelope job, CancellationToken ct)
+    {
+        var unclassified = await resourceAccessRepository.ListUnclassifiedByTenantAsync(tenant, ct);
+
+        var instance = new ReviewInstance
+        {
+            PlatformTenantId = job.PlatformTenantId,
+            ReviewDefinitionId = reviewDefinitionId,
+            Provider = GovernanceProvider.Internal,
+        };
+
+        if (unclassified.Count > 0)
+        {
+            // Cross-Reference (Erweiterung 2026-08-31): WorkloadResource.ExternalId ist immer
+            // die stabile Entra-Object-ID (siehe WorkloadResource-Kommentar), genau wie
+            // ResourceAccess.ExternalResourceId (DiscoveryHandler schreibt dort
+            // DirectoryGroupMembership.GroupId hinein) — beide vergleichbar, um dem Admin in
+            // der Reason zu sagen, WELCHER Workload (und dessen Owner, siehe unten) betroffen
+            // ist, statt nur eine rohe Object-ID zu zeigen. ALLE Workloads sammeln, die eine
+            // Ressource nutzen (nicht nur den ersten Treffer) — eine Gruppe kann von mehreren
+            // Workloads geteilt werden (Erweiterung 2026-08-31 "Geteilte Gruppen"), dann ist
+            // potenziell mehr als ein Owner fuer die Klaerung zustaendig.
+            var workloads = await workloadRepository.ListAsync(tenant, ct);
+            var matchesByExternalId = workloads
+                .SelectMany(w => w.Resources.Select(r => (Workload: w, Resource: r)))
+                .Where(x => !string.IsNullOrWhiteSpace(x.Resource.ExternalId))
+                .GroupBy(x => x.Resource.ExternalId!, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var access in unclassified)
+            {
+                string reason;
+                if (matchesByExternalId.TryGetValue(access.ExternalResourceId, out var matches) && matches.Count > 0)
+                {
+                    var resourceLabel = $"{matches[0].Resource.ResourceType}:{matches[0].Resource.DisplayName ?? matches[0].Resource.ExternalId}";
+                    // Owner ohne konfigurierten Wert wird bewusst als "kein Owner hinterlegt"
+                    // statt stillschweigend uebersprungen ausgewiesen — sonst bliebe unklar,
+                    // WER die "Gast zuweisen"-Entscheidung treffen soll (Nutzeranforderung:
+                    // "Owner in die Review geben", damit klar ist, wer verantwortlich ist).
+                    var ownerList = string.Join(", ", matches.Select(m =>
+                        $"{m.Workload.Name} (Owner: {(string.IsNullOrWhiteSpace(m.Workload.Owner) ? "kein Owner hinterlegt" : m.Workload.Owner)})"));
+                    reason = $"Mitglied von {resourceLabel} — keine Workload-Zuweisung fuer diesen Gast gefunden. " +
+                        $"Betroffene(r) Workload(s): {ownerList}. Zuweisung muss bewusst durch den/die Owner erfolgen.";
+                }
+                else
+                {
+                    reason = $"Mitglied von {access.ResourceType}:{access.ExternalResourceId} — keinem bekannten Workload zugeordnet.";
+                }
+
+                instance.Items.Add(new ReviewItem
+                {
+                    ReviewInstanceId = instance.Id,
+                    ResourceAccessId = access.Id,
+                    Reason = reason,
+                });
+            }
+        }
+
+        await reviewRepository.UpsertAsync(instance, ct);
+
+        logger.LogInformation(
+            "Discovery-Review {ReviewInstanceId} gestartet mit {ItemCount} Items. CorrelationId={CorrelationId}",
+            instance.Id, instance.Items.Count, job.CorrelationId);
+
+        return $"Discovery-Review {instance.Id} gestartet: {instance.Items.Count} Unclassified ResourceAccess-Eintrag(e) als Items aufgenommen.";
     }
 }
 
 /// <summary>
-/// Wendet eine Review-Entscheidung an (Blueprint 13.2). Remove führt zu einem
-/// RevokeWorkloadRole-Job und entfernt NUR den Workload-Zugriff — niemals die
-/// Gastidentität (Anhang A, Regel 3).
+/// Wendet eine Review-Entscheidung an (Blueprint 13.2). Verhalten haengt vom Item-Typ ab
+/// (Erweiterung 2026-08-31 "Discovery-Sichtbarkeit ueber Review", siehe ReviewItem-Kommentar):
+/// - Assignment-Item (AssignmentId gesetzt): Remove führt zu einem RevokeWorkloadRole-Job und
+///   entfernt NUR den Workload-Zugriff — niemals die Gastidentität (Anhang A, Regel 3).
+/// - Discovery-Item (ResourceAccessId gesetzt): Keep/Remove aendert AUSSCHLIESSLICH die
+///   Classification des ResourceAccess auf Classified — es wird NIE automatisch ein
+///   RevokeWorkloadRole-Job oder eine GuestWorkloadAssignment erzeugt, da fuer ein Discovery-
+///   Item per Definition keine formale Zuweisung existiert (sonst waere es ein Assignment-
+///   Item). "Remove" bedeutet hier organisatorisch "als geprueft und zu entfernen markiert" —
+///   das tatsaechliche Entfernen aus der Gruppe bleibt eine bewusste, separate Admin-Aktion
+///   im Mock-Entra-Verzeichnis (Anhang A Regel 4: Desired State und Actual State sind
+///   getrennt, Reconciliation/Discovery loesen NIE automatisch Provisionierung/Loeschung aus).
 /// </summary>
 public sealed class ApplyReviewDecisionHandler(
     IReviewRepository reviewRepository,
     IAssignmentRepository assignmentRepository,
+    IResourceAccessRepository resourceAccessRepository,
     B2B.Portal.Application.Services.ProvisioningService provisioningService,
     B2B.Portal.Application.Services.AuditService auditService,
     ILogger<ApplyReviewDecisionHandler> logger) : IJobHandler
 {
     public string JobType => JobTypes.ApplyReviewDecision;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var reviewInstanceId = Guid.Parse(job.EntityId);
         var reviewItemId = job.Payload.GetProperty("ReviewItemId").GetGuid();
         var decision = Enum.Parse<ReviewDecision>(job.Payload.GetProperty("Decision").GetString()!);
+        var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
 
-        var instance = await reviewRepository.GetAsync(
-            TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), reviewInstanceId, ct);
+        var instance = await reviewRepository.GetAsync(tenant, reviewInstanceId, ct);
         var item = instance?.Items.FirstOrDefault(i => i.Id == reviewItemId);
         if (instance is null || item is null)
         {
             logger.LogWarning("ApplyReviewDecision: ReviewItem {ReviewItemId} nicht gefunden.", reviewItemId);
-            return;
+            return $"ReviewItem {reviewItemId} in ReviewInstance {reviewInstanceId} nicht gefunden — keine Entscheidung angewendet.";
         }
 
         item.Decision = decision;
@@ -88,14 +192,68 @@ public sealed class ApplyReviewDecisionHandler(
         item.DecidedAt = DateTimeOffset.UtcNow;
         await reviewRepository.UpsertAsync(instance, ct);
 
+        string resultMessage;
+        if (item.ResourceAccessId is Guid resourceAccessId)
+        {
+            resultMessage = await ApplyDiscoveryDecisionAsync(tenant, resourceAccessId, item, decision, ct);
+        }
+        else
+        {
+            resultMessage = await ApplyAssignmentDecisionAsync(job, item, decision, ct);
+        }
+
+        await auditService.RecordAsync(
+            job.PlatformTenantId,
+            item.DecidedBy ?? "system:review-handler",
+            "ApplyReviewDecision",
+            nameof(ReviewItem),
+            item.Id.ToString(),
+            decision.ToString(),
+            job.CorrelationId,
+            details: item.ResourceAccessId is not null
+                ? $"ReviewInstance={instance.Id};ResourceAccess={item.ResourceAccessId}"
+                : $"ReviewInstance={instance.Id};Assignment={item.AssignmentId}",
+            ct: ct);
+
+        logger.LogInformation(
+            "ReviewItem {ReviewItemId} entschieden: {Decision}. CorrelationId={CorrelationId}",
+            reviewItemId, decision, job.CorrelationId);
+
+        return resultMessage;
+    }
+
+    private async Task<string> ApplyDiscoveryDecisionAsync(
+        TenantContext tenant, Guid resourceAccessId, ReviewItem item, ReviewDecision decision, CancellationToken ct)
+    {
+        var access = await resourceAccessRepository.GetAsync(tenant, resourceAccessId, ct);
+        if (access is null)
+        {
+            return $"ResourceAccess {resourceAccessId} nicht gefunden — keine Klassifizierung vorgenommen.";
+        }
+
+        access.Classification = AccessClassification.Classified;
+        await resourceAccessRepository.UpsertAsync(access, ct);
+
+        return $"Discovery-Item (ResourceAccess {resourceAccessId}, {access.ResourceType}:{access.ExternalResourceId}) " +
+            $"entschieden: {decision} von {item.DecidedBy}. Als Classified markiert — " +
+            "KEIN automatischer Zugriffsentzug (Actual/Desired State bleiben getrennt, siehe Anhang A Regel 4); " +
+            (decision == ReviewDecision.Remove
+                ? "ein tatsaechliches Entfernen aus der Gruppe erfordert eine bewusste Admin-Aktion im Mock-Entra-Verzeichnis."
+                : "Zugriff bleibt unveraendert bestehen.");
+    }
+
+    private async Task<string> ApplyAssignmentDecisionAsync(
+        JobEnvelope job, ReviewItem item, ReviewDecision decision, CancellationToken ct)
+    {
+        var assignmentId = item.AssignmentId!.Value;
         if (decision == ReviewDecision.Remove)
         {
             var assignment = await assignmentRepository.GetAsync(
-                TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), item.AssignmentId, ct);
+                TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), assignmentId, ct);
             await provisioningService.EnqueueJobAsync(
                 job.PlatformTenantId, job.DirectoryTenantId, JobTypes.RevokeWorkloadRole,
-                nameof(GuestWorkloadAssignment), item.AssignmentId.ToString(),
-                desiredStateHash: $"revoke-{item.AssignmentId}",
+                nameof(GuestWorkloadAssignment), assignmentId.ToString(),
+                desiredStateHash: $"revoke-{assignmentId}",
                 new
                 {
                     GuestId = assignment?.GuestId ?? Guid.Empty,
@@ -108,19 +266,7 @@ public sealed class ApplyReviewDecisionHandler(
                 workloadId: assignment?.WorkloadId);
         }
 
-        await auditService.RecordAsync(
-            job.PlatformTenantId,
-            item.DecidedBy ?? "system:review-handler",
-            "ApplyReviewDecision",
-            nameof(ReviewItem),
-            item.Id.ToString(),
-            decision.ToString(),
-            job.CorrelationId,
-            details: $"ReviewInstance={instance.Id};Assignment={item.AssignmentId}",
-            ct: ct);
-
-        logger.LogInformation(
-            "ReviewItem {ReviewItemId} entschieden: {Decision}. CorrelationId={CorrelationId}",
-            reviewItemId, decision, job.CorrelationId);
+        return $"ReviewItem (Assignment {assignmentId}) entschieden: {decision} von {item.DecidedBy}" +
+            (decision == ReviewDecision.Remove ? " — RevokeWorkloadRole-Job eingereiht." : ".");
     }
 }

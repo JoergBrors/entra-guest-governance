@@ -26,6 +26,11 @@ public sealed class ProvisioningService(IJobRepository jobRepository, IJobQueue 
         string? triggeredBy = null,
         Guid? workloadId = null)
     {
+        // Einmal serialisieren, fuer DirectoryOperation.PayloadJson (Restart-Grundlage) UND
+        // JobEnvelope.Payload (Worker-Transport) wiederverwenden statt zweimal zu serialisieren.
+        var payloadJsonString = JsonSerializer.Serialize(payload);
+        var payloadJson = JsonSerializer.SerializeToElement(payload);
+
         var operation = new DirectoryOperation
         {
             PlatformTenantId = platformTenantId,
@@ -40,11 +45,12 @@ public sealed class ProvisioningService(IJobRepository jobRepository, IJobQueue 
             Status = JobStatus.Pending,
             CreatedAt = clock.UtcNow,
             UpdatedAt = clock.UtcNow,
+            Log = [new JobLogEntry(clock.UtcNow, JobStatus.Pending, "Job erstellt und in Queue eingereiht.")],
+            PayloadJson = payloadJsonString,
         };
 
         await jobRepository.UpsertAsync(operation, ct);
 
-        var payloadJson = JsonSerializer.SerializeToElement(payload);
         var envelope = JobEnvelope.Create(
             platformTenantId, directoryTenantId, jobType, entityType, entityId,
             desiredStateHash, payloadJson, correlationId, operation.Id);

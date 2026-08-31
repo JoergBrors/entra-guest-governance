@@ -21,6 +21,18 @@ public interface IGuestDirectory
     Task<IReadOnlyList<DirectoryGroupMembership>> ListMembershipsAsync(
         string directoryTenantId, string entraObjectId, CancellationToken ct);
 
+    /// <summary>
+    /// Alle Entra-Object-IDs, die tatsaechlich Mitglied der gegebenen Gruppe/Ressource sind
+    /// (Kehrseite von ListMembershipsAsync, das pro Gast abfragt) — Erweiterung 2026-08-31
+    /// "Ist-Mitgliederzahl je Workload-Ressource": Grundlage fuer die Anzeige "N Mitglieder im
+    /// Verzeichnis" neben den formalen GuestWorkloadAssignments, damit eine Diskrepanz wie
+    /// "Gruppe hat 3 tatsaechliche Mitglieder, aber 0 Assignments" sichtbar wird, ohne
+    /// automatisch etwas an Assignments zu aendern (siehe WorkloadManagementService.
+    /// GetAssignmentCountsAsync-Kommentar und die Discovery-Review-Erweiterung).
+    /// </summary>
+    Task<IReadOnlyList<string>> ListGroupMemberObjectIdsAsync(
+        string directoryTenantId, string groupExternalId, CancellationToken ct);
+
     Task<string> InviteGuestAsync(
         string directoryTenantId, string mail, string displayName, CancellationToken ct);
 

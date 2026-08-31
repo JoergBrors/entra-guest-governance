@@ -4,7 +4,7 @@ using B2B.Portal.Domain.ValueObjects;
 namespace B2B.Portal.Application.Ports;
 
 /// <summary>
-/// Abstraktion für die Job Queue. PoC nutzt LocalJobQueue, Produktion z.B.
+/// Abstraktion für die Job Queue. PoC/Development nutzt CosmosJobQueue, Produktion z.B.
 /// Azure Service Bus (Blueprint 19.4 "IJobQueue: CosmosJobQueue (PoC) / ServiceBusJobQueue").
 /// </summary>
 public interface IJobQueue
@@ -28,6 +28,43 @@ public interface IJobQueue
 }
 
 /// <summary>
+/// Persistenter Steuerungs-/Statuszustand eines periodischen Worker-BackgroundService
+/// (Erweiterung 2026-08-31 "Job/Worker-Audit — Worker-Steuerung"): IsPaused steuert, ob der
+/// naechste PeriodicTimer-Tick tatsaechlich ausgefuehrt wird oder uebersprungen bleibt (siehe
+/// PeriodicWorkerBase) — persistent, damit ein pausierter Worker auch einen Prozessneustart
+/// pausiert bleibt, statt beim naechsten "dotnet run" automatisch wieder loszulaufen. Die
+/// Last*-Felder tragen den Ausgang des letzten Laufs (unabhaengig von Pause/Resume) fuer die
+/// Worker-Detailansicht (GET /api/dev/workers).
+/// </summary>
+public sealed record WorkerControlState(
+    string WorkerName,
+    bool IsPaused,
+    string? PausedBy,
+    DateTimeOffset? PausedAt,
+    DateTimeOffset? LastRunStartedAt,
+    DateTimeOffset? LastRunCompletedAt,
+    bool? LastRunSucceeded,
+    string? LastRunSummary,
+    string? LastTriggeredBy,
+    DateTimeOffset? TriggerRequestedAt = null,
+    string? TriggerRequestedBy = null);
+
+/// <summary>
+/// Persistenz fuer WorkerControlState — ein Dokument je periodischem Worker (Erweiterung
+/// 2026-08-31). Container "jobs" (siehe CosmosWorkerControlRepository), weil Worker-Steuerung
+/// inhaltlich zur Job-/Ausfuehrungs-Infrastruktur gehoert, nicht zum fachlichen Desired/Actual
+/// State.
+/// </summary>
+public interface IWorkerControlRepository
+{
+    Task<IReadOnlyList<WorkerControlState>> ListAllAsync(CancellationToken ct);
+
+    Task<WorkerControlState?> GetAsync(string workerName, CancellationToken ct);
+
+    Task UpsertAsync(WorkerControlState state, CancellationToken ct);
+}
+
+/// <summary>
 /// E-Mail ist ein eigener technischer Provider, kein Bestandteil der Fachlogik
 /// (MVP-Dokument Abschnitt 6). LOCAL_MOCK rendert eine Vorschau statt zu senden.
 /// </summary>
@@ -37,7 +74,11 @@ public sealed record EmailMessage(
     string TemplateId,
     IReadOnlyDictionary<string, string> TemplateData,
     Guid CorrelationId,
-    string? WorkloadContext);
+    string? WorkloadContext,
+    // Erweiterung 2026-08-30 "Mail Monitor": noetig, damit ein persistenter Mail-Sink
+    // (CosmosMailSinkRepository) prozessuebergreifend nach Tenant filtern kann — ohne dieses
+    // Feld haette IEmailProvider.SendAsync keinen Tenant-Kontext zum Schreiben.
+    string PlatformTenantId);
 
 public interface IEmailProvider
 {
@@ -134,6 +175,15 @@ public interface IResourceAccessRepository
 {
     Task<IReadOnlyList<ResourceAccess>> ListByGuestAsync(
         TenantContext tenant, Guid guestId, CancellationToken ct);
+
+    /// <summary>Alle Unclassified ResourceAccess eines Tenants, ueber alle Gaeste hinweg
+    /// (Erweiterung 2026-08-31 "Discovery-Sichtbarkeit ueber Review") — Grundlage fuer
+    /// StartReviewHandler, um entdeckte, aber noch nicht klassifizierte Zugriffe als
+    /// Discovery-ReviewItems aufzunehmen.</summary>
+    Task<IReadOnlyList<ResourceAccess>> ListUnclassifiedByTenantAsync(TenantContext tenant, CancellationToken ct);
+
+    Task<ResourceAccess?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
+
     Task UpsertAsync(ResourceAccess access, CancellationToken ct);
 }
 
@@ -156,6 +206,145 @@ public interface IExternalOrganizationRepository
     Task<ExternalOrganization?> GetByNameAsync(TenantContext tenant, string name, CancellationToken ct);
     Task<IReadOnlyList<ExternalOrganization>> ListAsync(TenantContext tenant, CancellationToken ct);
     Task UpsertAsync(ExternalOrganization organization, CancellationToken ct);
+}
+
+/// <summary>
+/// Persistenz-DTO fuer einen Mock-Entra-Benutzer (Erweiterung 2026-08-30: Cosmos-Speicherung
+/// statt reinem In-Memory-Singleton, siehe
+/// B2B.Portal.Infrastructure.Directory.MockEntraDirectoryStore/MockEntraUser). Bewusst als
+/// eigener, schmaler DTO-Typ in Application/Ports (statt Referenz auf den Infrastructure-Typ
+/// MockEntraUser) definiert — Application darf Infrastructure nicht referenzieren
+/// (B2B.Portal.Architecture.Tests). Die Infrastructure-Implementierung
+/// (CosmosMockEntraUserRepository) mappt zwischen MockEntraUser und diesem DTO.
+/// </summary>
+public sealed record MockEntraUserRecord(
+    string ObjectId,
+    string UserPrincipalName,
+    string Mail,
+    string DisplayName,
+    string GivenName,
+    string Surname,
+    string CompanyName,
+    string Department,
+    string JobTitle,
+    string Sponsor,
+    string AccountEnabled,
+    string UserType,
+    IReadOnlyList<string> PortalRoles,
+    string PlatformTenantId,
+    DateTimeOffset? LastLoginAt = null);
+
+/// <summary>
+/// Persistenz fuer Mock-Entra-Benutzer (Erweiterung 2026-08-30: Cosmos-Speicherung statt
+/// reinem In-Memory-Singleton). Bewusst schmal gehalten — nur was fuer Login-Lookup,
+/// Startup-Hydration und Rollen-Persistenz gebraucht wird (siehe MockEntraDirectoryStore,
+/// das diesen Port fuer UpsertUser/Startup-Hydration nutzt).
+/// </summary>
+public interface IMockEntraUserRepository
+{
+    /// <summary>Alle Benutzer ueber ALLE Tenants (fuer die Startup-Hydration des In-Memory
+    /// Stores, bevor ein Tenant-Kontext ueberhaupt bekannt ist — analog zum Cold-Start-Problem
+    /// bei /api/dev/mock-entra/login-users).</summary>
+    Task<IReadOnlyList<MockEntraUserRecord>> ListAllAsync(CancellationToken ct);
+
+    Task<IReadOnlyList<MockEntraUserRecord>> ListAsync(TenantContext tenant, CancellationToken ct);
+
+    Task UpsertAsync(MockEntraUserRecord user, CancellationToken ct);
+}
+
+/// <summary>DTO fuer eine Mock-Entra-Gruppe (siehe MockEntraUserRecord-Kommentar: Application
+/// darf Infrastructure nicht referenzieren, daher dieses eigene Record statt MockEntraGroup).
+/// </summary>
+public sealed record MockEntraGroupRecord(
+    string ObjectId,
+    string DisplayName,
+    string MailNickname,
+    string Description,
+    IReadOnlyList<string> GroupTypes,
+    bool MailEnabled,
+    bool SecurityEnabled,
+    IReadOnlyList<string> ResourceProvisioningOptions);
+
+/// <summary>DTO fuer eine Mock-Entra-Gruppenmitgliedschaft.</summary>
+public sealed record MockEntraMembershipRecord(string GroupId, string EntraObjectId);
+
+/// <summary>DTO fuer eine Mock-Entra-Anwendung (App-Registrierung).</summary>
+public sealed record MockEntraApplicationRecord(
+    string ObjectId,
+    string AppId,
+    string DisplayName,
+    IReadOnlyList<MockEntraApplicationRoleRecord> AppRoles);
+
+public sealed record MockEntraApplicationRoleRecord(string Id, string Value, string DisplayName, string Description);
+
+/// <summary>DTO fuer einen Mock-Entra-Anwendungs-Sign-in.</summary>
+public sealed record MockEntraApplicationSignInRecord(string AppId, string EntraObjectId, DateTimeOffset LastLoginAt);
+
+/// <summary>
+/// Persistenz fuer den restlichen Mock-Entra-Bestand (Gruppen, Mitgliedschaften, Anwendungen,
+/// Anwendungs-Sign-ins) — Ergaenzung zu IMockEntraUserRepository (Erweiterung 2026-08-31:
+/// vorher lebten Gruppen/Memberships/Applications/AppSignIns ausschliesslich im In-Memory
+/// MockEntraDirectoryStore-Singleton und gingen bei jedem Prozessneustart (API wie Worker)
+/// verloren — Gruppen liessen sich zwar teilweise aus persistierten WorkloadResource-Eintraegen
+/// rekonstruieren (siehe MockEntraDirectoryStore.HydrateFromWorkloadsAndGuestsAsync), aber
+/// eigenstaendig angelegte oder manuell administrierte Gruppen/Mitgliedschaften (z.B. ueber
+/// /api/dev/mock-entra/groups) nicht. Bewusst ohne TenantContext-Parameter — Gruppen/
+/// Anwendungen sind im Mock-Entra-Stamm (anders als Users) nicht tenant-gebunden (siehe
+/// MockEntraGroup/MockEntraApplication in MockGuestDirectory.cs), Cosmos-seitig laufen die
+/// Queries daher Cross-Partition wie IMockEntraUserRepository.ListAllAsync.
+/// </summary>
+public interface IMockEntraDirectoryRepository
+{
+    Task<IReadOnlyList<MockEntraGroupRecord>> ListGroupsAsync(CancellationToken ct);
+
+    Task UpsertGroupAsync(MockEntraGroupRecord group, CancellationToken ct);
+
+    Task DeleteGroupAsync(string objectId, CancellationToken ct);
+
+    Task<IReadOnlyList<MockEntraMembershipRecord>> ListMembershipsAsync(CancellationToken ct);
+
+    Task UpsertMembershipAsync(MockEntraMembershipRecord membership, CancellationToken ct);
+
+    Task DeleteMembershipAsync(string groupId, string entraObjectId, CancellationToken ct);
+
+    Task DeleteMembershipsByGroupAsync(string groupId, CancellationToken ct);
+
+    Task<IReadOnlyList<MockEntraApplicationRecord>> ListApplicationsAsync(CancellationToken ct);
+
+    Task UpsertApplicationAsync(MockEntraApplicationRecord application, CancellationToken ct);
+
+    Task DeleteApplicationAsync(string objectId, CancellationToken ct);
+
+    Task<IReadOnlyList<MockEntraApplicationSignInRecord>> ListApplicationSignInsAsync(CancellationToken ct);
+
+    Task UpsertApplicationSignInAsync(MockEntraApplicationSignInRecord signIn, CancellationToken ct);
+}
+
+/// <summary>
+/// Persistenz fuer die Erinnerungs-Policy fuer offene Einladungen (Erweiterung 2026-08-30
+/// "Invitation Reminder Worker"). Genau eine Policy pro PlatformTenantId — GetAsync liefert
+/// null, solange der Tenant noch keine eigene Policy konfiguriert hat (Worker/Scanner
+/// behandeln das als "keine Reminder aktiv", siehe InvitationReminderWorker).
+/// </summary>
+public interface IReminderPolicyRepository
+{
+    Task<ReminderPolicy?> GetAsync(TenantContext tenant, CancellationToken ct);
+
+    Task UpsertAsync(ReminderPolicy policy, CancellationToken ct);
+}
+
+/// <summary>
+/// Persistenter Log der ueber IEmailProvider versendeten (Mock-)Mails (Mail Monitor,
+/// Erweiterung 2026-08-30). Noetig, weil API und Worker getrennte Prozesse mit jeweils
+/// eigenem In-Memory-Zustand sind — ein rein prozesslokaler Sink im API-Prozess wuerde nie die
+/// tatsaechlich vom Worker-Prozess versendeten Mails zeigen (derselbe Grund, aus dem
+/// MockEntraUser/Job-Status bereits frueher von InMemory auf Cosmos migriert wurden).
+/// </summary>
+public interface IMailSinkRepository
+{
+    Task AppendAsync(TenantContext tenant, EmailMessage message, DateTimeOffset sentAt, CancellationToken ct);
+
+    Task<IReadOnlyList<(EmailMessage Message, DateTimeOffset SentAt)>> ListAsync(TenantContext tenant, int take, CancellationToken ct);
 }
 
 /// <summary>Ein Sheet als Zeilen von Rohwerten, gelesen ab der Kopfzeile — die technische

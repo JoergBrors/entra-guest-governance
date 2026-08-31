@@ -1,4 +1,3 @@
-using System.Net;
 using System.Text.Json.Serialization;
 using B2B.Portal.Application.Ports;
 using B2B.Portal.Domain.Entities;
@@ -10,7 +9,9 @@ namespace B2B.Portal.Infrastructure.Data.Cosmos;
 
 /// <summary>
 /// Cosmos-Implementierung von IJobRepository, Container "jobs" (dort liegen ausserdem die
-/// JobEnvelope-Transportdokumente von CosmosJobQueue — disambiguiert per entityType).
+/// JobEnvelope-Transportdokumente von CosmosJobQueue — disambiguiert per entityType UND per
+/// Cosmos-Dokument-Id: JobEnvelopeDocument nutzt seit dem Ueberschreib-Bug (siehe dortiger
+/// Kommentar) das Praefix "envelope-{jobId}" statt derselben Id wie DirectoryOperation).
 /// </summary>
 public sealed class CosmosJobRepository(CosmosClientFactory factory) : IJobRepository
 {
@@ -25,16 +26,22 @@ public sealed class CosmosJobRepository(CosmosClientFactory factory) : IJobRepos
 
     public async Task<DirectoryOperation?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct)
     {
-        try
-        {
-            var response = await Container.ReadItemAsync<DirectoryOperationDocument>(
-                id.ToString(), new PartitionKey(tenant.PlatformTenantId), cancellationToken: ct);
-            return response.Resource.EntityType == EntityType ? response.Resource.ToEntity() : null;
-        }
-        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
-        {
-            return null;
-        }
+        // Kein ReadItemAsync per Point-Read: JobEnvelope (CosmosJobQueue) und
+        // DirectoryOperation teilen dieselbe Id im selben Container (siehe Klassenkommentar).
+        // Ein Point-Read kennt kein zusaetzliches Filterpraedikat und deserialisiert die
+        // Rohantwort direkt in DirectoryOperationDocument, BEVOR der EntityType geprueft
+        // werden kann — trifft er zuerst auf das JobEnvelope-Dokument (z.B. status "Leased",
+        // kein gueltiger JobStatus-Enum-Wert), wirft der System.Text.Json-EnumConverter statt
+        // eines sauberen Null-Ergebnisses. Daher per Query mit entityType-Filter lesen, wie
+        // die uebrigen Methoden dieser Klasse es bereits tun.
+        var query = Container.GetItemQueryIterator<DirectoryOperationDocument>(
+            new QueryDefinition("SELECT * FROM c WHERE c.id = @id AND c.entityType = @type")
+                .WithParameter("@id", id.ToString())
+                .WithParameter("@type", EntityType),
+            requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey(tenant.PlatformTenantId) });
+
+        var page = await query.ReadNextAsync(ct);
+        return page.FirstOrDefault()?.ToEntity();
     }
 
     public async Task<IReadOnlyList<DirectoryOperation>> ListOpenSecurityRelevantAsync(
@@ -105,6 +112,11 @@ internal sealed class DirectoryOperationDocument
     [JsonPropertyName("lastError")] public string? LastError { get; init; }
     [JsonPropertyName("createdAt")] public required DateTimeOffset CreatedAt { get; init; }
     [JsonPropertyName("updatedAt")] public required DateTimeOffset UpdatedAt { get; init; }
+    [JsonPropertyName("log")] public List<JobLogEntryDocument> Log { get; init; } = [];
+    // Optional: Dokumente aus der Zeit vor dieser Erweiterung haben kein payloadJson -> null,
+    // System.Text.Json belaesst fehlende Properties beim Deserialisieren auf ihrem Default
+    // (null), bricht also nicht an bestehenden Cosmos-Dokumenten.
+    [JsonPropertyName("payloadJson")] public string? PayloadJson { get; init; }
 
     public static DirectoryOperationDocument FromEntity(DirectoryOperation op) => new()
     {
@@ -123,6 +135,8 @@ internal sealed class DirectoryOperationDocument
         LastError = op.LastError,
         CreatedAt = op.CreatedAt,
         UpdatedAt = op.UpdatedAt,
+        Log = [.. op.Log.Select(l => new JobLogEntryDocument(l.Timestamp, l.Status, l.Message))],
+        PayloadJson = op.PayloadJson,
     };
 
     public DirectoryOperation ToEntity() => new()
@@ -142,5 +156,12 @@ internal sealed class DirectoryOperationDocument
         LastError = LastError,
         CreatedAt = CreatedAt,
         UpdatedAt = UpdatedAt,
+        Log = [.. Log.Select(l => new JobLogEntry(l.Timestamp, l.Status, l.Message))],
+        PayloadJson = PayloadJson,
     };
 }
+
+internal sealed record JobLogEntryDocument(
+    [property: JsonPropertyName("timestamp")] DateTimeOffset Timestamp,
+    [property: JsonPropertyName("status")] JobStatus Status,
+    [property: JsonPropertyName("message")] string? Message);

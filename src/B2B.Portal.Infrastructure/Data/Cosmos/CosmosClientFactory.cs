@@ -8,8 +8,8 @@ namespace B2B.Portal.Infrastructure.Data.Cosmos;
 /// <summary>
 /// Baut den singleton CosmosClient aus derselben Konfiguration, die
 /// scripts/requirements.ps1 -InitCosmosEmulator bereits nach .env.local schreibt
-/// (COSMOS_EMULATOR_ENDPOINT/COSMOS_EMULATOR_KEY/COSMOS_DATABASE_ID). Nur relevant, wenn
-/// DATA_PROVIDER=cosmos gesetzt ist — der InMemory-Default benötigt diese Klasse nicht.
+/// (COSMOS_EMULATOR_ENDPOINT/COSMOS_EMULATOR_KEY/COSMOS_DATABASE_ID). Cosmos DB ist der
+/// einzige Datenprovider — diese Klasse wird bei jedem Start von API/Worker benötigt.
 /// </summary>
 public sealed class CosmosClientFactory
 {
@@ -27,7 +27,7 @@ public sealed class CosmosClientFactory
         if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(key))
         {
             throw new InvalidOperationException(
-                "DATA_PROVIDER=cosmos erfordert COSMOS_EMULATOR_ENDPOINT und COSMOS_EMULATOR_KEY " +
+                "Cosmos DB erfordert COSMOS_EMULATOR_ENDPOINT und COSMOS_EMULATOR_KEY " +
                 "(siehe .env.local, erzeugt durch scripts/requirements.ps1 -InitCosmosEmulator).");
         }
 

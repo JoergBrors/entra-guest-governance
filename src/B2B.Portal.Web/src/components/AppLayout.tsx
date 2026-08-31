@@ -1,10 +1,7 @@
-import { useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { makeStyles, tokens, Text, Title3, Input, Select, Button } from '@fluentui/react-components';
 import { SignOutRegular } from '@fluentui/react-icons';
-import { api } from '../api/client';
 import { listPortalThemes } from '../themes/theme-loader';
-import type { MockEntraUser } from '../types/domain';
 
 const useStyles = makeStyles({
   shell: {
@@ -74,7 +71,7 @@ interface AppLayoutProps {
   platformTenantId: string;
   themeId: string;
   onThemeChange: (themeId: string) => void;
-  onUserChange: () => void;
+  onSignOut: () => void;
 }
 
 /**
@@ -82,32 +79,12 @@ interface AppLayoutProps {
  * "Meine Workloads" ist bewusst die User-Ansicht ohne Graph-/Governance-Details;
  * der Admin/Governance-Bereich ist separat gruppiert (Guest Pool, Reviews, Jobs, Audit).
  */
-export function AppLayout({ productName, userMail, roles, platformTenantId, themeId, onThemeChange, onUserChange }: AppLayoutProps) {
+export function AppLayout({ productName, userMail, roles, platformTenantId, themeId, onThemeChange, onSignOut }: AppLayoutProps) {
   const styles = useStyles();
-  const [loginUsers, setLoginUsers] = useState<MockEntraUser[]>([]);
   const isAdmin = roles.includes('GovernanceAdmin');
   const isReviewer = isAdmin || roles.includes('Reviewer');
   const canManageWorkloads = isAdmin || roles.includes('WorkloadOwner') || roles.includes('ScenarioManager');
   const themes = listPortalThemes();
-
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    api.listMockEntraLoginUsers().then(setLoginUsers).catch(() => setLoginUsers([]));
-  }, [userMail]);
-
-  const switchUser = (mail: string) => {
-    const user = loginUsers.find((u) => u.mail === mail);
-    if (!user) return;
-    localStorage.setItem('portal-user-mail', user.mail);
-    localStorage.setItem('portal-user-roles', user.portalRoles.join(','));
-    onUserChange();
-  };
-
-  const signOut = () => {
-    localStorage.removeItem('portal-user-mail');
-    localStorage.removeItem('portal-user-roles');
-    onUserChange();
-  };
 
   return (
     <div className={styles.shell}>
@@ -159,6 +136,15 @@ export function AppLayout({ productName, userMail, roles, platformTenantId, them
                 <NavLink to="/jobs" className={styles.navLink}>
                   Jobs
                 </NavLink>
+                <NavLink to="/worker" className={styles.navLink}>
+                  Worker
+                </NavLink>
+                <NavLink to="/reminder-policy" className={styles.navLink}>
+                  Erinnerungs-Policy
+                </NavLink>
+                <NavLink to="/mail-monitor" className={styles.navLink}>
+                  Mail Monitor
+                </NavLink>
                 <NavLink to="/audit" className={styles.navLink}>
                   Audit
                 </NavLink>
@@ -198,17 +184,8 @@ export function AppLayout({ productName, userMail, roles, platformTenantId, them
               ))}
             </Select>
           )}
-          {import.meta.env.DEV && (
-            <Select aria-label="Dev Login" value={userMail} onChange={(event) => switchUser(event.target.value)}>
-              {loginUsers.map((user) => (
-                <option key={user.objectId} value={user.mail}>
-                  {user.displayName} ({user.userType})
-                </option>
-              ))}
-            </Select>
-          )}
           <Text size={200}>{roles.join(', ')}</Text>
-          <Button appearance="subtle" icon={<SignOutRegular />} onClick={signOut}>{userMail}</Button>
+          <Button appearance="subtle" icon={<SignOutRegular />} onClick={onSignOut}>{userMail}</Button>
         </header>
         <main className={styles.content}>
           <Outlet />

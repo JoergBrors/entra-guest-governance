@@ -16,7 +16,7 @@ public sealed class NotificationHandler(
 {
     public string JobType => JobTypes.SendNotification;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var payload = job.Payload;
         var recipient = payload.GetProperty("RecipientMail").GetString()!;
@@ -38,7 +38,8 @@ public sealed class NotificationHandler(
             TemplateId: templateId,
             TemplateData: templateData,
             CorrelationId: job.CorrelationId,
-            WorkloadContext: workloadContext);
+            WorkloadContext: workloadContext,
+            PlatformTenantId: job.PlatformTenantId);
 
         await emailProvider.SendAsync(message, ct);
 
@@ -46,5 +47,8 @@ public sealed class NotificationHandler(
             "Notification verarbeitet: Sender={Sender} Recipient={Recipient} Template={Template} " +
             "Workload={Workload} CorrelationId={CorrelationId}",
             senderMailboxConfig, recipient, templateId, workloadContext, job.CorrelationId);
+
+        return $"Mail '{templateId}' von {senderMailboxConfig} an {recipient} gesendet" +
+            (workloadContext is not null ? $" (Workload-Kontext: {workloadContext})." : ".");
     }
 }

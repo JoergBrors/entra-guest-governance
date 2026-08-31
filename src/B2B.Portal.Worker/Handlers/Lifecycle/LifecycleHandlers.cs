@@ -20,7 +20,7 @@ public sealed class ValidateDeletionHandler(
 {
     public string JobType => JobTypes.ValidateDeletion;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var guestId = Guid.Parse(job.EntityId);
         var gracePeriodReached = job.Payload.TryGetProperty("GracePeriodReached", out var g) && g.GetBoolean();
@@ -31,6 +31,9 @@ public sealed class ValidateDeletionHandler(
         logger.LogInformation(
             "Deletion Gate für Guest {GuestId}: {Result} Blockers=[{Blockers}] CorrelationId={CorrelationId}",
             guestId, evaluation.Result, string.Join(',', evaluation.Blockers), job.CorrelationId);
+
+        return $"Deletion Gate fuer Guest {guestId}: {evaluation.Result}" +
+            (evaluation.Blockers.Count > 0 ? $", Blocker(s): {string.Join(", ", evaluation.Blockers)}." : ", keine Blocker.");
     }
 }
 
@@ -44,20 +47,22 @@ public sealed class DisableGuestHandler(IGuestAccountRepository guestRepository,
 {
     public string JobType => JobTypes.DisableGuest;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var guest = await guestRepository.GetAsync(
             TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), Guid.Parse(job.EntityId), ct);
         if (guest is null)
         {
             logger.LogWarning("DisableGuest: Guest {EntityId} nicht gefunden.", job.EntityId);
-            return;
+            return $"GuestAccount {job.EntityId} nicht gefunden — nicht deaktiviert.";
         }
 
         guest.TransitionTo(GuestAccountState.Disabled, viaGovernanceCore: true);
         await guestRepository.UpsertAsync(guest, ct);
 
         logger.LogInformation("Guest {GuestId} disabled. CorrelationId={CorrelationId}", guest.Id, job.CorrelationId);
+
+        return $"Guest {guest.DisplayName} ({guest.Mail}) auf Disabled gesetzt.";
     }
 }
 
@@ -76,21 +81,21 @@ public sealed class DeleteGuestHandler(
 {
     public string JobType => JobTypes.DeleteGuest;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         if (!allowGuestDelete)
         {
             logger.LogWarning(
                 "DeleteGuest blockiert: ALLOW_GUEST_DELETE=false (LOCAL_MOCK Default). " +
                 "Job {JobId} wird nicht ausgeführt.", job.JobId);
-            return;
+            return "Blockiert: ALLOW_GUEST_DELETE=false (LOCAL_MOCK Default) — nicht geloescht.";
         }
 
         var guest = await guestRepository.GetAsync(
             TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId), Guid.Parse(job.EntityId), ct);
         if (guest is null)
         {
-            return;
+            return $"GuestAccount {job.EntityId} nicht gefunden — nicht geloescht.";
         }
 
         var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
@@ -100,7 +105,7 @@ public sealed class DeleteGuestHandler(
             logger.LogWarning(
                 "DeleteGuest blockiert: Guest {GuestId} hat noch {AssignmentCount} Workload-Zuordnung(en).",
                 guest.Id, assignments.Count);
-            return;
+            return $"Blockiert: Guest {guest.DisplayName} hat noch {assignments.Count} Workload-Zuordnung(en) — nicht geloescht.";
         }
 
         var evaluation = await lifecycleService.EvaluateDeletionAsync(
@@ -110,12 +115,14 @@ public sealed class DeleteGuestHandler(
             logger.LogWarning(
                 "DeleteGuest blockiert: Deletion Gate fuer Guest {GuestId} ist {Result}; Blockers=[{Blockers}].",
                 guest.Id, evaluation.Result, string.Join(',', evaluation.Blockers));
-            return;
+            return $"Blockiert: Deletion Gate ist {evaluation.Result}, Blocker(s): {string.Join(", ", evaluation.Blockers)} — nicht geloescht.";
         }
 
         guest.TransitionTo(GuestAccountState.Deleted, viaGovernanceCore: true);
         await guestRepository.UpsertAsync(guest, ct);
 
         logger.LogInformation("Guest {GuestId} deleted. CorrelationId={CorrelationId}", guest.Id, job.CorrelationId);
+
+        return $"Guest {guest.DisplayName} ({guest.Mail}) endgueltig auf Deleted gesetzt.";
     }
 }

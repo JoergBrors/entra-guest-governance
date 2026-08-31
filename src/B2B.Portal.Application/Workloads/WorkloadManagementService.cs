@@ -7,7 +7,44 @@ using B2B.Portal.Domain.ValueObjects;
 
 namespace B2B.Portal.Application.Workloads;
 
-public sealed record WorkloadAssignmentCounts(int Active, int Inactive);
+/// <summary>
+/// Active/Inactive sind Ist-Groessen (Erweiterung 2026-08-31 "Aktiv = tatsaechliche
+/// Gruppenmitgliedschaft"): betrachtet werden ALLE Gaeste, die entweder tatsaechlich Mitglied
+/// einer Gruppen-/Team-Ressource dieses Workload im Mock-Entra-Verzeichnis sind, oder eine
+/// GuestWorkloadAssignment auf diesen Workload haben (Vereinigung Ist ∪ Soll — wer weder
+/// Mitglied noch je zugewiesen war, taucht gar nicht auf):
+///   Active:   tatsaechlich Gruppenmitglied UND (kein Assignment noetig ODER die zugehoerige
+///             Einladung wurde angenommen [GuestAccountState nicht mehr Invited/Discovered]
+///             UND das Assignment ist nicht Revoked).
+///   Inactive: (a) ein Assignment existiert, dessen Einladung aber noch nicht angenommen
+///             wurde (Invited/Discovered), ODER (b) ein Assignment wurde Revoked, die Person
+///             ist aber IMMER NOCH tatsaechlich Gruppenmitglied (Revoke-Job hat noch nicht
+///             gegriffen oder ist fehlgeschlagen — genau die Drift, die diese Ist/Soll-
+///             Vereinigung sichtbar machen soll, statt sie zu verstecken).
+/// Dieselbe Ist-Groesse (Active&gt;0) triggert weiterhin die Hart-Loeschen-Sperre (siehe
+/// DeleteWorkloadAsync) — bewusst so gewaehlt: ein Workload mit noch echten Gruppenmitgliedern
+/// (auch ueber einen ANDEREN Workload zugewiesen, wenn Ressourcen geteilt werden) soll sich
+/// nicht loeschen lassen, solange dieser Zugriff ueber seine Ressourcen faktisch besteht.
+///
+/// DirectoryMemberCount bleibt als reine Rohzahl bestehen (Gesamtzahl eindeutiger
+/// Entra-Objekte in den Gruppen-Ressourcen dieses Workload, OHNE Zuordnung zu einem Assignment
+/// — z.B. weil der Gast dem Portal unbekannt ist) — SharedWith zeigt zusaetzlich, mit welchen
+/// ANDEREN Workloads eine Ressource geteilt wird, damit die Herkunft fremder Mitglieder in der
+/// UI erklaerbar bleibt (siehe WorkloadsAdminPage). Beide null, wenn kein IGuestDirectory
+/// verfuegbar ist (z.B. in aelteren Tests, die WorkloadManagementService ohne diese Dependency
+/// konstruieren).
+/// </summary>
+public sealed record WorkloadAssignmentCounts(
+    int Active,
+    int Inactive,
+    int? DirectoryMemberCount = null,
+    IReadOnlyList<SharedResourceInfo>? SharedWith = null);
+
+/// <summary>Eine Gruppen-/Team-Ressource dieses Workload, die auch von mindestens einem
+/// anderen Workload genutzt wird — samt dessen Namen, damit die UI erklaeren kann, warum
+/// "Mitglieder im Verzeichnis" mehr zeigt als eigene Assignments (Erweiterung 2026-08-31
+/// "Geteilte Gruppen ueber mehrere Workloads").</summary>
+public sealed record SharedResourceInfo(string ResourceDisplayName, IReadOnlyList<string> OtherWorkloadNames);
 
 /// <summary>
 /// Bündelt alle schreibenden Operationen auf Workload/WorkloadRole/WorkloadResource
@@ -22,7 +59,9 @@ public sealed class WorkloadManagementService(
     IWorkloadRepository workloadRepository,
     IWorkloadScenarioRepository scenarioRepository,
     IAssignmentRepository assignmentRepository,
-    AuditService auditService)
+    AuditService auditService,
+    IGuestDirectory? guestDirectory = null,
+    IGuestAccountRepository? guestAccountRepository = null)
 {
     public async Task<Workload> CreateWorkloadAsync(
         TenantContext tenant, string name, string? owner, string? templateId,
@@ -111,14 +150,115 @@ public sealed class WorkloadManagementService(
             workload.Id.ToString(), "Accepted", Guid.NewGuid(), ct: ct);
     }
 
-    /// <summary>Aktive vs. inaktive/beendete Zuweisungen eines Workload — Grundlage für die
-    /// "Wie viele Nutzer hat dieser Workload noch?"-Anzeige und die Hart-Löschen-Sperre.</summary>
+    /// <summary>Aktive vs. inaktive Nutzer eines Workload — Ist-Groessen, siehe
+    /// WorkloadAssignmentCounts-Kommentar fuer die genaue Definition. Grundlage für die
+    /// "Wie viele Nutzer hat dieser Workload noch?"-Anzeige und die Hart-Löschen-Sperre.
+    /// Faellt ohne IGuestDirectory/IGuestAccountRepository auf die alte, rein
+    /// assignment-basierte Zaehlung zurueck (z.B. in Tests, die den Service ohne diese
+    /// optionalen Dependencies konstruieren).</summary>
     public async Task<WorkloadAssignmentCounts> GetAssignmentCountsAsync(
         TenantContext tenant, Guid workloadId, CancellationToken ct)
     {
         var assignments = await assignmentRepository.ListByWorkloadAsync(tenant, workloadId, ct);
-        var active = assignments.Count(a => a.Status is AssignmentStatus.Active or AssignmentStatus.Approved or AssignmentStatus.Requested);
-        return new WorkloadAssignmentCounts(active, assignments.Count - active);
+
+        if (guestDirectory is null || guestAccountRepository is null)
+        {
+            var legacyActive = assignments.Count(a => a.Status is AssignmentStatus.Active or AssignmentStatus.Approved or AssignmentStatus.Requested);
+            return new WorkloadAssignmentCounts(legacyActive, assignments.Count - legacyActive);
+        }
+
+        var workload = await workloadRepository.GetAsync(tenant, workloadId, ct);
+        var groupResources = workload?.Resources
+            .Where(r => IsMockEntraGroupResource(r) && !string.IsNullOrWhiteSpace(r.ExternalId))
+            .ToList() ?? [];
+
+        if (groupResources.Count == 0)
+        {
+            // Kein Verzeichnisbezug moeglich (z.B. AppRole-only Workload) — faellt auf die
+            // reine Assignment-Zaehlung zurueck, da es keine Gruppenmitgliedschaft gibt, die
+            // die Ist-Groesse beeinflussen koennte.
+            var active = assignments.Count(a => a.Status is AssignmentStatus.Active or AssignmentStatus.Approved or AssignmentStatus.Requested);
+            return new WorkloadAssignmentCounts(active, assignments.Count - active, DirectoryMemberCount: 0, SharedWith: []);
+        }
+
+        // Ist: alle tatsaechlichen Mitglieder ueber alle Gruppen-Ressourcen dieses Workload.
+        var directoryMemberIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var resource in groupResources)
+        {
+            var groupMembers = await guestDirectory.ListGroupMemberObjectIdsAsync(
+                tenant.DirectoryTenantId ?? string.Empty, resource.ExternalId!, ct);
+            foreach (var memberId in groupMembers)
+            {
+                directoryMemberIds.Add(memberId);
+            }
+        }
+
+        // Soll: Assignment je Gast, inkl. GuestAccountState (Einladung akzeptiert?) und
+        // EntraObjectId (fuer den Abgleich gegen directoryMemberIds).
+        var guestAccounts = await guestAccountRepository.ListAsync(tenant, ct);
+        var guestById = guestAccounts.ToDictionary(g => g.Id);
+        var assignmentByGuestId = assignments
+            // Bei mehreren Assignments desselben Gasts auf denselben Workload zaehlt der
+            // "beste" Status (Active/Approved/Requested vor Revoked/Expired/...), damit ein
+            // alter, laengst abgeloester Revoke-Datensatz eine neuere aktive Zuweisung nicht
+            // ueberdeckt.
+            .GroupBy(a => a.GuestId)
+            .ToDictionary(g => g.Key, g => g.OrderBy(a => a.Status is AssignmentStatus.Active or AssignmentStatus.Approved or AssignmentStatus.Requested ? 0 : 1).First());
+
+        var relevantGuestIds = new HashSet<Guid>(assignmentByGuestId.Keys);
+        var entraObjectIdByGuestId = guestById
+            .Where(kv => !string.IsNullOrWhiteSpace(kv.Value.EntraObjectId))
+            .ToDictionary(kv => kv.Key, kv => kv.Value.EntraObjectId!);
+        foreach (var (guestId, entraObjectId) in entraObjectIdByGuestId)
+        {
+            if (directoryMemberIds.Contains(entraObjectId))
+            {
+                relevantGuestIds.Add(guestId);
+            }
+        }
+
+        var activeCount = 0;
+        var inactiveCount = 0;
+        foreach (var guestId in relevantGuestIds)
+        {
+            var isMember = guestById.TryGetValue(guestId, out var guest)
+                && !string.IsNullOrWhiteSpace(guest.EntraObjectId)
+                && directoryMemberIds.Contains(guest.EntraObjectId);
+            assignmentByGuestId.TryGetValue(guestId, out var assignment);
+            var invitationAccepted = guest is not null
+                && guest.AccountState is not (GuestAccountState.Discovered or GuestAccountState.Invited);
+            var isRevoked = assignment?.Status == AssignmentStatus.Revoked;
+
+            if (isMember && (assignment is null || (invitationAccepted && !isRevoked)))
+            {
+                activeCount++;
+            }
+            else
+            {
+                inactiveCount++;
+            }
+        }
+
+        // SharedWith: fuer jede Gruppen-Ressource dieses Workload, welche ANDEREN Workloads
+        // dieselbe ObjectId ebenfalls referenzieren — erklaert in der UI, woher fremde
+        // Mitglieder in directoryMemberIds stammen koennen (Erweiterung 2026-08-31 "Geteilte
+        // Gruppen ueber mehrere Workloads").
+        var allWorkloads = await workloadRepository.ListAsync(tenant, ct);
+        var sharedWith = new List<SharedResourceInfo>();
+        foreach (var resource in groupResources)
+        {
+            var otherNames = allWorkloads
+                .Where(w => w.Id != workloadId)
+                .Where(w => w.Resources.Any(r => string.Equals(r.ExternalId, resource.ExternalId, StringComparison.OrdinalIgnoreCase)))
+                .Select(w => w.Name)
+                .ToList();
+            if (otherNames.Count > 0)
+            {
+                sharedWith.Add(new SharedResourceInfo(resource.DisplayName ?? resource.ExternalId!, otherNames));
+            }
+        }
+
+        return new WorkloadAssignmentCounts(activeCount, inactiveCount, directoryMemberIds.Count, sharedWith);
     }
 
     /// <summary>Hartes Löschen — nur erlaubt, wenn keine aktiven Zuweisungen mehr existieren
@@ -136,7 +276,8 @@ public sealed class WorkloadManagementService(
         if (counts.Active > 0)
         {
             throw new InvalidOperationException(
-                $"Workload '{workload.Name}' hat noch {counts.Active} aktive Zuweisung(en) und kann nicht endgültig gelöscht werden.");
+                $"Workload '{workload.Name}' hat noch {counts.Active} aktive Nutzer (Zuweisung und/oder tatsächliche " +
+                "Gruppenmitgliedschaft) und kann nicht endgültig gelöscht werden.");
         }
 
         var scenarios = await scenarioRepository.ListByWorkloadAsync(tenant, workloadId, ct);
@@ -251,21 +392,32 @@ public sealed class WorkloadManagementService(
 
     public async Task<WorkloadResource> UpsertResourceAsync(
         TenantContext tenant, Guid workloadId, Guid? resourceId, string resourceType,
-        string? externalId, string actor, CancellationToken ct)
+        string? externalId, string actor, CancellationToken ct, string? displayName = null)
     {
         var workload = await workloadRepository.GetAsync(tenant, workloadId, ct)
             ?? throw new InvalidOperationException($"Workload {workloadId} nicht gefunden.");
 
         var resource = resourceId is null ? null : workload.Resources.FirstOrDefault(r => r.Id == resourceId);
+        var isNewResource = resource is null;
         if (resource is null)
         {
-            resource = new WorkloadResource { WorkloadId = workload.Id, ResourceType = resourceType, ExternalId = externalId, Managed = true };
+            resource = new WorkloadResource
+            {
+                WorkloadId = workload.Id, ResourceType = resourceType, ExternalId = externalId,
+                DisplayName = displayName, Managed = true,
+            };
             workload.Resources.Add(resource);
         }
         else
         {
             resource.ResourceType = resourceType;
             resource.ExternalId = externalId;
+            resource.DisplayName = displayName ?? resource.DisplayName;
+        }
+
+        if (isNewResource)
+        {
+            EnsureDefaultRoleForGroupResource(workload, resource);
         }
 
         workload.UpdatedAt = DateTimeOffset.UtcNow;
@@ -278,19 +430,81 @@ public sealed class WorkloadManagementService(
         return resource;
     }
 
+    /// <summary>
+    /// Legt automatisch eine Standard-Rolle an, wenn ein Workload OHNE Application (kein
+    /// ApplicationExternalId, also nie App-Rollen relevant) eine erste Gruppen-Ressource
+    /// bekommt und noch keine einzige WorkloadRole hat (Erweiterung 2026-08-31 "Default-Rolle
+    /// fuer reine Gruppen-Workloads"). Vorher musste ein Admin bei jedem Gruppen-Workload
+    /// manuell eine Rolle im Freitext-Formular anlegen, bevor ueberhaupt ein Gast zugewiesen
+    /// werden konnte — bei einem Workload ohne Application (das WorkloadsAdminPage-
+    /// App-Rollen-Dropdown blendet sich dort gar nicht erst ein, siehe applicationExternalId-
+    /// Gate) ist eine 1:1-Rollenmodellierung pro Gruppe unnoetiger Mehraufwand, wenn "Mitglied
+    /// dieser Gruppe(n)" der einzig sinnvolle Zugriffstyp ist. Ein Workload MIT Application
+    /// bleibt unveraendert: dort bildet i.d.R. jede AppRole eine eigene WorkloadRole, das
+    /// automatische Anlegen wuerde dem widersprechen. Erweitert eine bereits bestehende
+    /// Default-Rolle um die neue Ressource, statt bei jeder weiteren Gruppe erneut eine neue
+    /// Rolle anzulegen — ein Admin kann die Rolle jederzeit umbenennen/anpassen, das
+    /// automatische Verhalten greift dann nicht mehr erneut (siehe "noch keine Rolle"-Check).
+    /// </summary>
+    private static void EnsureDefaultRoleForGroupResource(Workload workload, WorkloadResource resource)
+    {
+        if (!string.IsNullOrWhiteSpace(workload.ApplicationExternalId) || !IsMockEntraGroupResource(resource))
+        {
+            return;
+        }
+
+        var defaultRole = workload.Roles.FirstOrDefault(r => r.Name == DefaultRoleName);
+        if (defaultRole is null)
+        {
+            if (workload.Roles.Count > 0)
+            {
+                // Es existiert bereits mindestens eine (vermutlich manuell angelegte oder
+                // umbenannte) Rolle — kein automatisches Eingreifen mehr, um eine bewusste
+                // Rollenmodellierung des Admins nicht zu ueberschreiben.
+                return;
+            }
+
+            defaultRole = new WorkloadRole { WorkloadId = workload.Id, Name = DefaultRoleName };
+            workload.Roles.Add(defaultRole);
+        }
+
+        defaultRole.ResourceMappings.Add(resource.Id);
+    }
+
+    private const string DefaultRoleName = "Standardzugriff";
+
+    private static bool IsMockEntraGroupResource(WorkloadResource resource) =>
+        resource.ResourceType.Equals("SecurityGroup", StringComparison.OrdinalIgnoreCase)
+        || resource.ResourceType.Equals("M365Group", StringComparison.OrdinalIgnoreCase)
+        || resource.ResourceType.Equals("Team", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Haengt eine Ressource an einen Workload — externalId MUSS die stabile Entra-Object-ID
+    /// sein (siehe WorkloadResource-Kommentar), displayName ist der rein informative,
+    /// snapshot-artige Anzeigename zum Zeitpunkt des Attachments. Dedupliziert bewusst nach
+    /// ResourceType+ExternalId (ObjectId), nicht nach DisplayName — eine im Verzeichnis
+    /// umbenannte Gruppe mit gleichbleibender ObjectId erzeugt so weiterhin keinen doppelten
+    /// Eintrag, nur der DisplayName-Snapshot wird beim erneuten Attach aufgefrischt.
+    /// </summary>
     public async Task<WorkloadResource> AttachResourceAsync(
-        TenantContext tenant, Guid workloadId, string resourceType, string externalId, string actor, CancellationToken ct)
+        TenantContext tenant, Guid workloadId, string resourceType, string externalId, string actor, CancellationToken ct,
+        string? displayName = null)
     {
         var workload = await workloadRepository.GetAsync(tenant, workloadId, ct)
             ?? throw new InvalidOperationException($"Workload {workloadId} nicht gefunden.");
 
-        if (workload.Resources.Any(r =>
+        var existing = workload.Resources.FirstOrDefault(r =>
             string.Equals(r.ResourceType, resourceType, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(r.ExternalId, externalId, StringComparison.OrdinalIgnoreCase)))
+            && string.Equals(r.ExternalId, externalId, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
         {
-            return workload.Resources.First(r =>
-                string.Equals(r.ResourceType, resourceType, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(r.ExternalId, externalId, StringComparison.OrdinalIgnoreCase));
+            if (displayName is not null && !string.Equals(existing.DisplayName, displayName, StringComparison.Ordinal))
+            {
+                existing.DisplayName = displayName;
+                workload.UpdatedAt = DateTimeOffset.UtcNow;
+                await workloadRepository.UpsertAsync(workload, ct);
+            }
+            return existing;
         }
 
         var resource = new WorkloadResource
@@ -298,9 +512,11 @@ public sealed class WorkloadManagementService(
             WorkloadId = workload.Id,
             ResourceType = resourceType,
             ExternalId = externalId,
+            DisplayName = displayName,
             Managed = false,
         };
         workload.Resources.Add(resource);
+        EnsureDefaultRoleForGroupResource(workload, resource);
         workload.UpdatedAt = DateTimeOffset.UtcNow;
         await workloadRepository.UpsertAsync(workload, ct);
 

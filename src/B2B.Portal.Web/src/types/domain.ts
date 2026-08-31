@@ -19,6 +19,20 @@ export interface GuestAccount {
   accountState: GuestAccountState;
   createdAt: string;
   updatedAt: string;
+  // Erweiterung 2026-08-30 "Invitation Reminder Worker": Mock-Redemption-Link (KEIN echter
+  // Entra-Link, siehe GuestAccount.cs) sowie Reminder-Tracking.
+  invitationRedemptionLink?: string | null;
+  lastReminderStageSent?: number | null;
+  lastReminderSentAt?: string | null;
+}
+
+/** Abgeleitet aus GuestAccountState (Invited = pending, alles andere = accepted) — siehe
+ * FilterGuestsAsync im Backend, dieselbe Ableitung wird hier fuers Guest-Pool-Filter-UI
+ * gespiegelt. */
+export type InvitationStatus = 'accepted' | 'pending';
+
+export function invitationStatusOf(state: GuestAccountState): InvitationStatus {
+  return state === 'Invited' ? 'pending' : 'accepted';
 }
 
 export interface WorkloadRole {
@@ -34,7 +48,10 @@ export interface WorkloadResource {
   id: string;
   workloadId: string;
   resourceType: string;
+  /** Stabile Entra-Object-ID der Ressource, niemals der Anzeigename (siehe displayName). */
   externalId?: string | null;
+  /** Informativer Anzeigename-Snapshot, z.B. der Gruppenname aus dem Mock-Entra-Verzeichnis. */
+  displayName?: string | null;
   managed: boolean;
 }
 
@@ -55,6 +72,12 @@ export interface Workload {
 
 export type JobStatus = 'Pending' | 'Running' | 'Success' | 'Retry' | 'Failed' | 'DeadLetter' | 'Cancelled';
 
+export interface JobLogEntryResponse {
+  timestamp: string;
+  status: JobStatus;
+  message?: string | null;
+}
+
 export interface JobStatusResponse {
   id: string;
   jobType: string;
@@ -68,6 +91,21 @@ export interface JobStatusResponse {
   lastError?: string | null;
   createdAt: string;
   updatedAt: string;
+  log: JobLogEntryResponse[];
+}
+
+export interface WorkerControlState {
+  workerName: string;
+  isPaused: boolean;
+  pausedBy?: string | null;
+  pausedAt?: string | null;
+  lastRunStartedAt?: string | null;
+  lastRunCompletedAt?: string | null;
+  lastRunSucceeded?: boolean | null;
+  lastRunSummary?: string | null;
+  lastTriggeredBy?: string | null;
+  triggerRequestedAt?: string | null;
+  triggerRequestedBy?: string | null;
 }
 
 export interface WorkloadMutationResponse {
@@ -75,9 +113,25 @@ export interface WorkloadMutationResponse {
   patternSyncJobId?: string | null;
 }
 
+export interface SharedResourceInfo {
+  resourceDisplayName: string;
+  otherWorkloadNames: string[];
+}
+
 export interface WorkloadAssignmentCounts {
+  /** Ist-Größe: tatsächlich Gruppenmitglied UND (kein Assignment nötig ODER Einladung
+   * angenommen UND Assignment nicht Revoked). */
   active: number;
+  /** Ist-Größe: Assignment ohne angenommene Einladung, ODER Assignment revoked aber Person
+   * ist noch tatsächlich Gruppenmitglied (Revoke-Job hat noch nicht gegriffen). */
   inactive: number;
+  /** Gesamtzahl eindeutiger Entra-Objekte, die tatsächlich Mitglied einer Gruppen-/Team-
+   * Ressource dieses Workload sind — kann höher als active+inactive sein, wenn dem Portal
+   * unbekannte Gäste Mitglied sind. */
+  directoryMemberCount?: number | null;
+  /** Ressourcen dieses Workload, die auch von anderen Workloads genutzt werden — erklärt,
+   * woher zusätzliche Mitglieder stammen können. */
+  sharedWith?: SharedResourceInfo[] | null;
 }
 
 export type AssignmentStatus =
@@ -100,7 +154,11 @@ export type ReviewDecision = 'Pending' | 'Keep' | 'Remove' | 'Escalated';
 export interface ReviewItem {
   id: string;
   reviewInstanceId: string;
-  assignmentId: string;
+  /** Gesetzt bei einem klassischen Assignment-Review-Item; exklusiv zu resourceAccessId. */
+  assignmentId?: string | null;
+  /** Gesetzt bei einem Discovery-Review-Item (entdeckte, noch nicht formal zugewiesene
+   * Gruppenmitgliedschaft) — exklusiv zu assignmentId. */
+  resourceAccessId?: string | null;
   decision: ReviewDecision;
   decidedBy?: string | null;
   decidedAt?: string | null;
@@ -238,7 +296,9 @@ export interface UiConfiguration {
   branding: {
     productName: string;
   };
-  user: {
+  // Nur gefuellt, wenn ein gueltiges Bearer-Token vorliegt (siehe App.tsx) — vor dem Login
+  // liefert /api/ui/configuration Theme/Branding fuer den Login-Screen ohne User-Objekt.
+  user?: {
     mail: string;
     roles: string[];
   };
@@ -259,6 +319,7 @@ export interface MockEntraUser {
   userType: string;
   portalRoles: string[];
   lastLoginAt?: string | null;
+  platformTenantId: string;
 }
 
 export interface MockEntraGroup {
@@ -310,4 +371,39 @@ export interface ScenarioUser {
   active: boolean;
   lastLoginAt?: string | null;
   applicationLastLoginAt?: string | null;
+}
+
+// ---- Reminder Policy / Mail Monitor (Erweiterung 2026-08-30) ---------------
+
+export interface ReminderStage {
+  stageNumber: number;
+  daysAfterInvite: number;
+  templateId: string;
+  templateSubject: string;
+  templateBody: string;
+}
+
+export interface ReminderPolicy {
+  platformTenantId: string;
+  stages: ReminderStage[];
+  updatedAt: string;
+}
+
+export interface MailSinkEntry {
+  senderMailbox: string;
+  recipientMail: string;
+  templateId: string;
+  correlationId: string;
+  workloadContext?: string | null;
+  templateData: Record<string, string>;
+  sentAt: string;
+}
+
+// Erweiterung 2026-08-30 (Teil 2 "Outlook-HTML-Templates"): Ergebnis von
+// POST /api/reminder-policy/preview — bereits vollstaendig mit Beispieldaten gerendertes HTML
+// (inkl. Outlook-Geruest, siehe OutlookHtmlEmailRenderer, Backend), fertig fuer eine
+// iframe-Vorschau ohne weitere Client-seitige Verarbeitung.
+export interface ReminderStagePreview {
+  renderedSubject: string;
+  renderedHtml: string;
 }

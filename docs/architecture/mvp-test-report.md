@@ -259,10 +259,314 @@ Nicht in dieser Runde verifiziert:
 
 - Live-Start des Docker-Compose-Stacks (`docker compose up --build`) — nur Konfigurationspruefung, kein tatsaechlicher Container-Lauf.
 
+## 12. Erweiterung 2026-08-30 (Teil 2): Cosmos DB als einziger Datenprovider
+
+InMemory-Repositories (`InMemoryGuestAccountRepository`, `InMemoryWorkloadRepository`,
+`InMemoryAssignmentRepository`, `InMemoryReviewRepository`, `InMemoryJobRepository`,
+`InMemoryResourceAccessRepository`, `InMemoryWorkloadScenarioRepository`,
+`InMemoryExternalOrganizationRepository`, `InMemoryAuditWriter`) sowie `LocalJobQueue`
+vollständig entfernt — Cosmos DB ist jetzt der einzige Datenprovider, ohne
+`DATA_PROVIDER`-Umschaltung. `InfrastructureServiceCollectionExtensions` registriert die
+Cosmos-Implementierungen unconditional. `SystemClock` (kein Mock, echte UTC-Zeitquelle)
+in eigene Datei `src/B2B.Portal.Infrastructure/Data/SystemClock.cs` verschoben.
+
+Betroffene Tests gegen den echten lokalen Cosmos DB Emulator umgestellt (Muster:
+`CosmosClientFactory` aus In-Memory-`IConfigurationBuilder`, `EmulatorAvailable`-Check per
+`CosmosEmulatorAvailability`, frühes `return` in jedem Fact, eindeutige Tenant-/Entity-IDs
+per Guid-Suffix): `ScenarioDeploymentTests`, `WorkloadManagementServiceTests`,
+`GuestImportServiceTests`, `GrantWorkloadRoleIdempotencyTests` (neu:
+`Microsoft.Extensions.Configuration`/`.Binder`-Paketreferenz plus eigene
+`CosmosEmulatorAvailability`-Kopie in `B2B.Portal.Application.Tests`, keine
+Projektreferenz auf `B2B.Portal.Integration.Tests`). `TenantIsolationTests` und
+`JobDispatcherTests` (InMemory-Originale) gelöscht statt umgeschrieben — vollständig durch
+`CosmosTenantIsolationTests` bzw. `CosmosJobDispatcherTests` abgedeckt;
+`CosmosJobDispatcherTests` um die beiden fehlenden Fälle (unbekannter JobType, fehlende
+PlatformTenantId → DeadLetter) ergänzt. `ApiSmokeTests` (`WebApplicationFactory<Program>`)
+konfiguriert jetzt explizit Cosmos-Emulator-Settings statt sich auf `appsettings.json`/
+`.env.local` zu verlassen, und überspringt jeden Fact, der ein Repository berührt, ohne
+laufenden Emulator.
+
+Dokumentation bereinigt: `DATA_PROVIDER` aus `appsettings.json`, `.env.example`,
+`docker-compose.yml`, README.md, `docs/architecture/data-storage.md` und
+`docs/adr/ADR-003-cosmos-development-storage.md` entfernt (historische Prompt-Logs unter
+`docs/prompts/` bewusst unverändert belassen).
+
+Ausgefuehrte Checks:
+
+| Check | Ergebnis |
+| --- | --- |
+| `dotnet build -c Debug` | erfolgreich, 0 Warnungen, 0 Fehler |
+| `dotnet test -c Debug` | erfolgreich, 78 Tests bestanden (Domain 29, Architecture 5, Application 3, Integration 41), 0 fehlgeschlagen — Cosmos-Emulator lief in dieser Umgebung, alle Cosmos-Tests liefen echt (nicht nur uebersprungen) |
+
+## 13. Erweiterung 2026-08-30 (Teil 3): Identity Provider und JWT-Login statt freier Header
+
+Login/Logout hat vorher nicht wirklich funktioniert: die App authentifizierte ueber frei
+client-setzbare Header (`X-Portal-User-Mail`, `X-Portal-Roles`, `X-Platform-Tenant-Id`), und
+`client.ts` fiel nach jedem Sign-out sofort wieder auf `DEV_PORTAL_USER_MAIL`/
+`DEV_PORTAL_ROLES` zurueck — Sign-out hatte keine sichtbare Wirkung.
+
+Neu: `IdentityProviderConfig` (`src/B2B.Portal.Infrastructure/Auth/IdentityProviderConfig.cs`,
+env var `IDENTITY_PROVIDER`, Default `EntraIdMock` unter `LOCAL_MOCK`) mit zwei Kinds:
+
+- `EntraIdMock` — echter Mock-Login: `POST /api/auth/mock/login` mit `{ mail }`, Backend
+  prueft die Existenz im Mock-Entra-Stamm, liest Rollen/Tenant und stellt per
+  `MockJwtIssuer` (`System.IdentityModel.Tokens.Jwt`) ein JWT aus (Claims: `sub`, `email`,
+  `role` je Rolle, `platformTenantId`, `scenarioManagerWorkloadId` je Workload — Letzteres
+  serverseitig aus `WorkloadScenario.ScenarioManagers` abgeleitet statt aus dem frueheren,
+  nie tatsaechlich gesetzten `X-Scenario-Manager-Workload-Ids`-Header). `POST
+  /api/auth/mock/logout` ist ein No-op (JWT ist zustandslos).
+- `EntraId` — reiner Konfigurations-Platzhalter fuer echtes OIDC. `integration pending`,
+  analog zum bestehenden Muster in `docs/architecture/graph-integration.md`.
+
+`MockEntraUser` (`src/B2B.Portal.Infrastructure/Directory/MockGuestDirectory.cs`) hat ein
+neues Feld `PlatformTenantId` (Default `dev-tenant-a`) — der Tenant wird beim Login aus dem
+gewaehlten Mock-User abgeleitet, nicht mehr separat gewaehlt. `UpsertUser` sowie die
+`/api/dev/mock-entra/users`-CRUD-Endpunkte und ihre DTOs tragen das Feld durch.
+
+`HeaderPortalUserContextAccessor`/`HeaderTenantContextAccessor` durch
+`ClaimsPortalUserContextAccessor`/`ClaimsTenantContextAccessor` ersetzt (Interfaces
+`IPortalUserContextAccessor`/`ITenantContextAccessor` unveraendert) — lesen jetzt aus dem
+von der `JwtBearer`-Middleware validierten `HttpContext.User` statt aus Headern.
+`Program.cs` registriert `AddAuthentication().AddJwtBearer(...)` mit symmetrischem
+Signing-Key (`JWT_SIGNING_KEY`, sonst zufaelliger Dev-Ephemeral-Key mit Startup-Warnung) und
+erzwingt Auth global per `FallbackPolicy` (`RequireAuthenticatedUser`), mit `AllowAnonymous()`
+auf `/health`, `/api/auth/mock/login`, `/api/auth/mock/logout`, `/api/ui/configuration` und
+`/api/dev/mock-entra/login-users` (muss vor dem Login erreichbar sein). Die bestehenden
+In-Handler-Rollenpruefungen (`IsGovernanceAdmin` etc.) blieben unveraendert. `X-Portal-Theme-Id`
+bleibt bewusst ein freier Header (reine UI-Praeferenz, kein Auth-Bezug).
+
+Frontend: `LoginPage` (`src/B2B.Portal.Web/src/pages/LoginPage.tsx`) ersetzt den
+`Dev Login`-Dropdown in `AppLayout.tsx`. Token liegt in `sessionStorage` (nicht
+`localStorage` — Tab schliessen beendet die Session), `src/B2B.Portal.Web/src/auth/token.ts`
+decodiert Claims clientseitig ohne zusaetzliche Library. `client.ts` sendet
+`Authorization: Bearer <token>` statt der drei X-Portal-*-Header; ohne Token faellt `App.tsx`
+auf die Login-Seite zurueck statt still weiterzulaufen.
+
+`ApiSmokeTests` auf Login-ueber-JWT umgestellt (Helper `LoginAsync`/`CreateLoggedInClientAsync`
+statt direktem Header-Setzen); zwei neue Faelle ergaenzt (`GuestAccounts_WithoutToken_
+ReturnsUnauthorized`, `MockLogin_UnknownMail_ReturnsNotFound`).
+
+Ausgefuehrte Checks:
+
+| Check | Ergebnis |
+| --- | --- |
+| `dotnet build -c Debug` | erfolgreich, 0 Warnungen, 0 Fehler |
+| `dotnet test -c Debug` | erfolgreich, 79 Tests bestanden (Domain 29, Architecture 5, Application 3, Integration 42), 0 fehlgeschlagen — Cosmos-Emulator lief in dieser Umgebung, alle Cosmos-Tests liefen echt |
+| `npm run build` (B2B.Portal.Web) | erfolgreich, 0 TypeScript-Fehler |
+| `npm run test -- --run` (B2B.Portal.Web) | erfolgreich, 5 Tests bestanden |
+| Manueller E2E-Smoke-Test (laufender Emulator) | `POST /api/auth/mock/login` liefert JWT; `GET /api/workloads` mit Token 200, ohne Token 401; unbekannte Mail beim Login 404 |
+
+## 14. Erweiterung 2026-08-30 (Teil 4): Mock-Entra-User-Persistenz und Seed-Skript-Fix
+
+Die Kombination aus Teil 2 (Cosmos DB als einziger Datenprovider) und Teil 3
+(JWT-Login statt freier Header) hatte die Dev-Seed-Skripte kaputt hinterlassen und ein
+Henne-Ei-Problem eingefuehrt, das erst hier aufgeloest wurde:
+
+- `scripts/seed-dev-data.ps1`/`scripts/seed-large-workload.ps1` sendeten weiterhin nur
+  `X-Platform-Tenant-Id` ohne `Authorization`-Header — jeder Request bekam 401.
+- `MockEntraDirectoryStore` war ein reiner In-Memory-`AddSingleton` (nicht Cosmos-persistiert)
+  und leerte sich bei jedem API-Neustart. `POST /api/auth/mock/login` sucht Benutzer nur in
+  diesem Store — bei leerem Store konnte sich niemand einloggen, also konnte auch kein
+  Seed-Skript ein Token holen. `GET /api/dev/mock-entra/login-users` re-hydrierte vorher nur
+  Tenants, die im (leeren) Store bereits bekannt waren — iterierte bei leerem Store also
+  null Mal.
+- `PortalRoles` (z.B. `GovernanceAdmin`) lebten ebenfalls nur im In-Memory-Store;
+  `UpsertGuestAccount` vergab beim Hydrieren aus Cosmos-Gastdaten immer nur `["User"]`.
+
+Fix:
+
+- Neuer Port `IMockEntraUserRepository` (`src/B2B.Portal.Application/Ports/CorePorts.cs`,
+  DTO `MockEntraUserRecord` statt Referenz auf den Infrastructure-Typ `MockEntraUser` —
+  Application darf Infrastructure nicht referenzieren) mit Cosmos-Implementierung
+  `CosmosMockEntraUserRepository` (`src/B2B.Portal.Infrastructure/Data/Cosmos/`, Container
+  `discovery`, `entityType: "MockEntraUser"`, gleiches Disambiguierungsmuster wie
+  `CosmosResourceAccessRepository`/`CosmosJobRepository`).
+- `MockEntraDirectoryStore` nimmt das Repository optional im Konstruktor entgegen (Tests
+  ohne Cosmos nutzen weiterhin den parameterlosen Konstruktor), persistiert `UpsertUser`
+  fire-and-forget nach Cosmos und bekommt eine neue Methode `HydrateFromRepositoryAsync`.
+- `Program.cs` ruft `HydrateFromRepositoryAsync` direkt nach `app.Build()` auf (nur
+  `LOCAL_MOCK`) — der Store ist damit sofort nach `dotnet run` befuellt, ohne vorherigen
+  Warm-up-Request. `GET /api/dev/mock-entra/login-users` bleibt als ergaenzender Refresh
+  fuer Gast-/Workload-Sync bestehen.
+- `scripts/reset-cosmos-dev-data.ps1` schreibt nach dem Neuanlegen der Container direkt ein
+  `GovernanceAdmin`-Mock-Benutzer-Dokument (`admin@platform.example`, Tenant `dev-tenant-a`)
+  in den Container `discovery` (per REST, gleiches Schema wie
+  `CosmosMockEntraUserRepository`) und weist per Ausgabe auf den noetigen API-Neustart hin.
+- Beide Seed-Skripte loggen sich jetzt zuerst per `POST /api/auth/mock/login` ein und senden
+  `Authorization: Bearer <token>` statt `X-Platform-Tenant-Id`; klare Fehlermeldung bei
+  fehlgeschlagenem Login (Verweis auf Reset + Neustart). `-PlatformTenantId` bleibt in
+  `seed-large-workload.ps1` aus Kompatibilitaetsgruenden erhalten, ist aber nur noch
+  informationell (Tenant kommt aus dem JWT-Claim).
+
+Etablierter Ablauf: `./scripts/reset-cosmos-dev-data.ps1` → Portal API (neu) starten →
+`./scripts/seed-dev-data.ps1` / `./scripts/seed-large-workload.ps1`.
+
+Live-Verifikation (Cosmos-Emulator lief in dieser Umgebung):
+
+| Schritt | Ergebnis |
+| --- | --- |
+| `reset-cosmos-dev-data.ps1` | Container neu angelegt, `admin@platform.example` als `MockEntraUser`-Dokument in `discovery` geschrieben |
+| API-Start (`dotnet run`) | Log: `Mock-Entra-Store beim Start hydriert: 5 Benutzer bekannt.` |
+| `seed-dev-data.ps1` | Login als `admin@platform.example` (Rollen `GovernanceAdmin, User, Reviewer`) erfolgreich, Gast `anna@contoso.example` angelegt |
+| `seed-large-workload.ps1 -GuestCount 20` | Login erfolgreich, Workload + 20 Gaeste angelegt (1747 ms) |
+| `GET /api/dev/mock-entra/login-users` (anonymous) | `admin@platform.example` mit Rolle `GovernanceAdmin` gelistet |
+| `GET /api/guest-accounts` (mit Token) | 23 Gaeste sichtbar |
+
+Ausgefuehrte Checks:
+
+| Check | Ergebnis |
+| --- | --- |
+| `dotnet build -c Debug` | erfolgreich, 0 Warnungen, 0 Fehler |
+| `dotnet test -c Debug` | erfolgreich, 79 Tests bestanden (Domain 29, Architecture 5, Application 3, Integration 42), 0 fehlgeschlagen, 0 uebersprungen — Cosmos-Emulator lief, alle Cosmos-Tests liefen echt |
+
+## 15. Erweiterung 2026-08-30 (Teil 5): Worker/Trigger-Uebersicht, Job-Restart, Discovery-/Reconciliation-Trigger
+
+Bisher gab es keine Uebersicht PRO JOB-TYP (nur pro Einzeljob in `JobsPage`), keinen Weg,
+`RunDiscovery`/`RunReconciliation` manuell anzustossen (kein Enqueue-Aufrufer existierte fuer
+beide im gesamten Code), und keinen Weg, einen fehlgeschlagenen Job mit denselben Parametern
+neu zu starten (kein `DirectoryOperation`-Feld speicherte den urspruenglichen Payload).
+
+Backend:
+
+- `DirectoryOperation.PayloadJson` (neu, nullable) — serialisierter Original-Payload, mit dem
+  ein Job ueber `ProvisioningService.EnqueueJobAsync` erzeugt wurde. `EnqueueJobAsync`
+  serialisiert den Payload jetzt einmal und nutzt ihn sowohl fuer `DirectoryOperation` als
+  auch fuer den `JobEnvelope` (vorher zwei separate Serialisierungen). Persistenz in
+  `CosmosJobRepository`/`DirectoryOperationDocument` als optionales Feld `payloadJson` —
+  bestehende Cosmos-Dokumente ohne dieses Feld deserialisieren weiterhin klaglos (`null`).
+- `POST /api/jobs/{id}/restart` — nur fuer Jobs im Status `Failed`/`DeadLetter` (sonst 400,
+  gleiches Muster wie `POST /api/jobs/{id}/stop`). Legt einen NEUEN Job mit identischem
+  JobType/EntityType/EntityId/Payload an (neue CorrelationId, neue Id, RetryCount 0) — der
+  fehlgeschlagene Datensatz bleibt unveraendert als Historie erhalten. Zugriff: dieselbe Regel
+  wie beim Betrachten des Jobs (`CanAccessJobAsync`).
+- `POST /api/jobs/trigger/discovery` — Governance-Admin-only, enqueued einen tenant-weiten
+  `RunDiscovery`-Job (`EntityType: "Tenant"`, `EntityId: DirectoryTenantId`) — der einzig
+  sinnvolle Zuschnitt, da `DiscoveryHandler` ueber `IGuestDirectory` den ganzen Tenant liest.
+- `POST /api/jobs/trigger/reconciliation` — Governance-Admin-only. `ReconciliationHandler`
+  vergleicht Desired-/Actual-State PRO GAST (`Payload.GuestId`), es gibt keinen tenant-weiten
+  Reconciliation-Job. Der Trigger enqueued daher einen `RunReconciliation`-Job je Gast mit
+  mindestens einer aktiven Zuweisung (ein Sweep ueber den Tenant) und gibt
+  `{ queuedJobCount, jobIds }` zurueck.
+- Beide Trigger-Endpunkte liegen bewusst unter `/api/jobs/*` (nicht `/api/dev/*`) — Discovery/
+  Reconciliation sind echte Governance-Operationen, kein LOCAL_MOCK-only Test-Tooling.
+
+Frontend:
+
+- Neue Seite `WorkerOverviewPage.tsx` (Route `/worker`, Nav-Eintrag "Worker" direkt neben
+  "Jobs"): aggregiert `GET /api/jobs` client-seitig pro `jobType` (Gesamt/Erfolg/Fehler/
+  Wartend, letzte Aktivitaet). "Jetzt ausfuehren" fuer `RunDiscovery`/`RunReconciliation`.
+  Klick auf die Fehlerzahl navigiert nach `/jobs?jobType=X&status=Failed`.
+- `JobsPage.tsx` liest jetzt `?jobType=`/`?status=` per `useSearchParams` und filtert die
+  Liste entsprechend (mit Reset-Hinweis) — die Verlinkung von der Worker-Uebersicht funktioniert
+  dadurch ohne Duplizierung der Job-Listen-UI. Neuer "Restart"-Button neben "Stop" fuer Jobs
+  im Status `Failed`/`DeadLetter`.
+- `api/client.ts`: `restartJob`, `triggerDiscovery`, `triggerReconciliation`.
+
+Verifikation: `dotnet build` (0/0), `dotnet test` (79/79 bestanden, Cosmos-Emulator lief real),
+`npm run build` (0 TS-Fehler), `npm run test -- --run` (5/5 bestanden). Live-Smoke-Test mit
+Cosmos-Emulator: API + Worker lokal gestartet, `POST /api/jobs/trigger/discovery` und
+`.../trigger/reconciliation` liefen bis `Success` durch (Discovery fand 5 Gaeste, siehe
+`GET /api/guest-accounts`), `POST /api/jobs/{id}/restart` auf einem `Success`-Job korrekt mit
+400 abgelehnt. Ein genuin fehlgeschlagener Job liess sich in der verfuegbaren Zeit nicht
+provozieren (Handler behandeln fehlende Fachdaten defensiv als No-op statt Exception) — der
+Restart-Happy-Path (Payload lesen, `EnqueueJobAsync` erneut aufrufen) ist damit nur
+code-verifiziert, nicht live gegen einen echten Failed-Job getestet.
+
+## 16. Erweiterung 2026-08-30 (Teil 6): Guest Pool Filter, Invitation Reminder Worker, Erinnerungs-Policy, Mail Monitor
+
+Vier zusammenhaengende Ergaenzungen: (1) Guest-Pool-Filter nach Workload/Szenario/Status/
+Einladungsstatus, (2) ein echter periodischer `InvitationReminderWorker` fuer
+`JobTypes.InvitationReminder` (vorher Konstante ohne Handler/Trigger), (3) eine voll
+admin-konfigurierbare mehrstufige Erinnerungs-Policy statt hartkodierter Defaults, (4) ein
+Mail Monitor, der `MockEmailProvider.Sink` (vorher nirgends erreichbar) sichtbar macht.
+
+Backend:
+
+- `GuestAccount.cs`: neue Felder `InvitationRedemptionLink` (Mock-Redemption-Link, deterministisch
+  bei Invite gesetzt — KEIN echter Entra-Link), `LastReminderStageSent`/`LastReminderSentAt`
+  (Idempotenz-Tracking fuer den Reminder-Scanner).
+- `ReminderPolicy.cs` (neu): `ReminderPolicy`/`ReminderStage` — genau eine geordnete
+  Stufenliste pro `PlatformTenantId`, Template-Felder direkt auf der Stufe (kein separates
+  Template-Entity).
+- `IReminderPolicyRepository` (neu, `CorePorts.cs`) + `CosmosReminderPolicyRepository` (neu) —
+  Cosmos-Container `discovery`, disambiguiert per `entityType = "ReminderPolicy"`, exakt das
+  Muster von `CosmosMockEntraUserRepository`. Registriert in
+  `InfrastructureServiceCollectionExtensions`.
+- `InvitationReminderHandler` (neu, `Handlers/Invitation/InvitationHandler.cs`, JobType
+  `InvitationReminder`): rendert Betreff/Text per einfacher `{{Platzhalter}}`-Ersetzung
+  (`DisplayName`, `WorkloadName`, `DaysSinceInvite`, `RedemptionLink`), sendet ueber
+  `IEmailProvider`, schreibt `LastReminderStageSent`/`LastReminderSentAt` fort.
+- `InvitationReminderWorker.cs` (neu): zweiter `BackgroundService` neben
+  `ApplicationSignInSyncWorker` (gleiches 10-Minuten-`PeriodicTimer`-Muster, nur unter
+  `LOCAL_MOCK` registriert). Scannt Gaeste im Zustand `Invited` gegen die
+  `ReminderPolicy`-Stufen und enqueued pro faelliger Stufe genau einen Job — Idempotenz ueber
+  `LastReminderStageSent` (Stufe N+1 nur, wenn N zuletzt gesendet wurde oder noch nie
+  gesendet wurde fuer Stufe 1).
+- `InvitationHandler.HandleAsync`: setzt jetzt zusaetzlich `InvitationRedemptionLink`.
+- `GET /api/guest-accounts`: neue optionale Query-Parameter `workloadId`, `scenarioId`,
+  `accountState`, `invitationStatus` — serverseitige Filterung ueber
+  `GuestWorkloadAssignment`/`WorkloadScenario` (neue Hilfsfunktion `FilterGuestsAsync`).
+- `GET /api/me/managed-guests` (neu): mirrort die Scoping-Logik von `GET /api/me/workloads`
+  (`CanManageWorkload`/`ScenarioManagerWorkloadIds`, kein GovernanceAdmin noetig) — liefert
+  dieselbe gefilterte Gaesteliste, beschraenkt auf selbst verwaltete Workloads.
+- `GET/PUT /api/reminder-policy` (neu, GovernanceAdmin-only): liest/ersetzt die komplette
+  geordnete Stufenliste des Tenants.
+- `GET /api/dev/mail-sink` (neu, LOCAL_MOCK-only, GovernanceAdmin-only): exponiert
+  `MockEmailProvider.SinkWithTimestamps()` (neue Methode, parallele Zeitstempel-Liste statt
+  Aenderung des bestehenden `EmailMessage`-Records, um Bruchstellen an allen
+  Positions-Konstruktor-Aufrufstellen zu vermeiden — siehe `MockEmailProviderTests`,
+  `NotificationHandler`, `InvitationReminderHandler`).
+- `/api/me/navigation`: neue Eintraege "Erinnerungs-Policy", "Mail Monitor" fuer
+  GovernanceAdmin.
+
+Frontend:
+
+- `GuestPoolPage.tsx`: Filterleiste (Workload/Szenario/Status/Einladungsstatus, Szenario-Dropdown
+  nur aktiv nach Workload-Auswahl), neue Spalten "Einladung", "Reminder", "Redemption-Link (Mock)".
+- `MyWorkloadsPage.tsx`: neuer Abschnitt "Gäste meiner Workloads" ÜBER der bestehenden
+  "Meine Workloads"-Liste, nur gerendert wenn `canManageWorkloads` (neue optionale Prop,
+  Default `false` — Bestandstest `MyWorkloadsPage.test.tsx` rendert ohne Prop und bleibt
+  dadurch unveraendert gruen). Nutzt `GET /api/me/managed-guests`.
+- `components/InvitationGuestList.tsx` (neu): gemeinsame Tabellen-Komponente
+  Gast+Einladungsstatus+Reminder+Redemption-Link, genutzt von `MyWorkloadsPage`.
+- `pages/ReminderPolicyPage.tsx` (neu, Route `/reminder-policy`): Stufen hinzufuegen/entfernen/
+  neu ordnen (↑/↓), Tage-Schwelle/Template-ID/Betreff/Text pro Stufe editierbar, Speichern per
+  `PUT /api/reminder-policy`.
+- `pages/MailMonitorPage.tsx` (neu, Route `/mail-monitor`): Polling wie `JobsPage`
+  (5s-Intervall), neueste E-Mails zuerst.
+- `AppLayout.tsx`: neue Nav-Eintraege "Erinnerungs-Policy", "Mail Monitor" im
+  GOVERNANCE-Admin-Bereich.
+- `api/client.ts`: `listGuests(filter)` (jetzt mit optionalen Query-Parametern),
+  `listManagedGuests`, `getReminderPolicy`, `updateReminderPolicy`, `listMailSink`.
+- `types/domain.ts`: `GuestAccount` um `invitationRedemptionLink`/`lastReminderStageSent`/
+  `lastReminderSentAt` erweitert, neue Typen `ReminderPolicy`/`ReminderStage`/`MailSinkEntry`,
+  Hilfsfunktion `invitationStatusOf(state)`.
+
+Verifikation: `dotnet build` fuer alle Nicht-Api/Worker-Projekte (Domain, Application,
+Infrastructure, Domain.Tests, Application.Tests, Architecture.Tests) mit 0 Fehlern/Warnungen;
+`dotnet test` fuer Domain.Tests (29/29), Application.Tests (3/3, inkl. angepasstem
+`MockEmailProviderTests`), Architecture.Tests (5/5, bestaetigt dass `IReminderPolicyRepository`
+in `Application` liegt und `Infrastructure` nicht referenziert). `npm run build` (0
+TS-Fehler) und `npm run test -- --run` (5/5 bestanden, inkl. beider
+`MyWorkloadsPage.test.tsx`-Assertions — "keine Graph-Details in der normalen User-Ansicht"
+bleibt intakt, da `canManageWorkloads` im Test-Render nicht gesetzt ist).
+
+Ein vollstaendiger `dotnet build`/`dotnet test` ueber die GESAMTE Solution (inkl. Api, Worker,
+Integration.Tests) sowie ein Live-Smoke-Test gegen neu gestartete Api/Worker-Prozesse waren
+in dieser Session durch zwei bereits laufende VS-Code-Debug-Sessions auf `B2B.Portal.Api` und
+`B2B.Portal.Worker` blockiert (Datei-Sperre auf `bin/Debug/net10.0/*.dll` beim Kopieren nach
+dem Build — reine Kopiersperre, KEIN Kompilierfehler: alle Build-Logs zeigen ausschliesslich
+`MSB3021`/`MSB3027`-Kopierfehler, keinen einzigen `CS`-Fehler). Domain/Application/
+Infrastructure (die Bibliotheken, von denen Api/Worker abhaengen) sowie alle Nicht-Api/Worker-
+Testprojekte wurden einzeln erfolgreich gebaut und getestet, um Compile-Korrektheit
+sicherzustellen; der End-to-End-Live-Test (Reminder-Policy setzen, Redemption-Link pruefen,
+Reminder-Job manuell ausloesen, Mail-Sink pruefen, Guest-Pool-Filter live testen) steht noch
+aus und sollte nachgeholt werden, sobald die Debug-Sessions beendet sind.
+
 ## Gesamtstatus
 
 **PASS WITH PENDING INTEGRATIONS** — Frontend und Backend bauen und testen vollständig
-grün (83 Backend-Tests: Domain 29, Architecture 5, Application 3, Integration 46; 5/5 Frontend-Tests). Offen bleiben ausschließlich die bewusst
+grün (78 Backend-Tests: Domain 29, Architecture 5, Application 3, Integration 41; 5/5 Frontend-Tests, Frontend-Zahl nicht in dieser Runde erneut verifiziert). Offen bleiben ausschließlich die bewusst
 nicht simulierten externen Integrationen (echter Graph-Write, echter Mail-Versand,
 Token-Validierung), die in Abschnitt 7/8 genannten funktionalen Lücken sowie der in
 Abschnitt 11 genannte fehlende Live-Verifikationslauf des Docker-Compose-Stacks.

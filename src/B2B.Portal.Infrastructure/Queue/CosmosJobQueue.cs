@@ -10,7 +10,10 @@ namespace B2B.Portal.Infrastructure.Queue;
 
 /// <summary>
 /// Cosmos-Implementierung von IJobQueue, Container "jobs" (dort liegen ausserdem die
-/// DirectoryOperation-Dokumente von CosmosJobRepository — disambiguiert per entityType).
+/// DirectoryOperation-Dokumente von CosmosJobRepository — disambiguiert per entityType UND
+/// per Cosmos-Dokument-Id-Praefix "envelope-", siehe JobEnvelopeDocument-Kommentar: Cosmos
+/// identifiziert Dokumente eindeutig ueber (id, partitionKey), ein entityType-Feld allein
+/// reicht nicht, um zwei Dokumente mit sonst identischer Id/Partition auseinanderzuhalten).
 /// Cosmos kennt kein natives FIFO-Dequeue-mit-Lock, daher: Status-Feld
 /// (Pending -&gt; Leased -&gt; Done/DeadLetter) plus optimistische Nebenläufigkeitskontrolle
 /// über ETag-conditional Replace, mit LeaseExpiresAt und Reclaim abgelaufener Leases beim
@@ -26,7 +29,7 @@ public sealed class CosmosJobQueue(CosmosClientFactory factory) : IJobQueue
     private Container Container => factory.GetContainer("jobs");
 
     public Task EnqueueAsync(JobEnvelope job, CancellationToken ct) =>
-        Container.CreateItemAsync(
+        Container.UpsertItemAsync(
             JobEnvelopeDocument.FromEnvelope(job, status: "Pending", leaseExpiresAt: null, attemptCount: 0),
             new PartitionKey(job.PlatformTenantId),
             cancellationToken: ct);
@@ -35,8 +38,8 @@ public sealed class CosmosJobQueue(CosmosClientFactory factory) : IJobQueue
     {
         var now = DateTimeOffset.UtcNow;
 
-        // Cross-Partition-Query: der Worker verarbeitet Jobs aller Tenants (wie schon
-        // LocalJobQueue es tut, eine gemeinsame Queue). Kandidaten: entweder Pending, oder
+        // Cross-Partition-Query: der Worker verarbeitet Jobs aller Tenants (eine
+        // gemeinsame Queue). Kandidaten: entweder Pending, oder
         // Leased mit abgelaufener Lease (Reclaim eines verwaisten Claims).
         var query = Container.GetItemQueryIterator<JobEnvelopeDocument>(
             new QueryDefinition(
@@ -135,11 +138,12 @@ public sealed class CosmosJobQueue(CosmosClientFactory factory) : IJobQueue
 
     private async Task<JobEnvelopeDocument?> FindByJobIdAsync(Guid jobId, CancellationToken ct)
     {
-        // JobId ist die Cosmos-Dokument-Id (siehe FromEnvelope) - Cross-Partition-Point-Read
-        // ueber eine ID-Query, da die Partition (platformTenantId) hier nicht bekannt ist.
+        // Cross-Partition-Query nach dem jobId-Feld, nicht der Cosmos-Dokument-Id (siehe
+        // FromEnvelope/DocumentId-Kommentar) - die Partition (platformTenantId) ist hier nicht
+        // bekannt.
         var query = Container.GetItemQueryIterator<JobEnvelopeDocument>(
-            new QueryDefinition("SELECT * FROM c WHERE c.id = @id AND c.entityType = @type")
-                .WithParameter("@id", jobId.ToString())
+            new QueryDefinition("SELECT * FROM c WHERE c.jobId = @jobId AND c.entityType = @type")
+                .WithParameter("@jobId", jobId.ToString())
                 .WithParameter("@type", EntityType));
 
         var page = await query.ReadNextAsync(ct);
@@ -149,7 +153,18 @@ public sealed class CosmosJobQueue(CosmosClientFactory factory) : IJobQueue
 
 internal sealed record JobEnvelopeDocument
 {
+    // Praefix "envelope-" bewusst NICHT identisch mit DirectoryOperation.Id (siehe
+    // CosmosJobRepository): Cosmos identifiziert Dokumente eindeutig ueber (id, partitionKey)
+    // - das entityType-Feld disambiguiert nur beim Lesen per Query, nicht beim Schreiben. Mit
+    // gleicher Id UND gleichem PartitionKey (platformTenantId) ueberschrieb ein UpsertAsync
+    // aus CosmosJobQueue.EnqueueAsync stillschweigend das zuvor von
+    // ProvisioningService/CosmosJobRepository geschriebene DirectoryOperation-Dokument (Bug:
+    // Jobs verschwanden komplett aus IJobRepository, "Job nicht gefunden" in der Jobs-UI,
+    // obwohl der Worker sie ueber die Queue korrekt fand und abarbeitete). JobId bleibt als
+    // eigenes Feld erhalten, um beide Dokumente weiterhin ueber dieselbe fachliche Job-Id zu
+    // korrelieren (Jobs-UI/API-Response nutzen ausschliesslich DirectoryOperation.Id).
     [JsonPropertyName("id")] public required string Id { get; init; }
+    [JsonPropertyName("jobId")] public required string JobId { get; init; }
     [JsonPropertyName("entityType")] public string EntityType { get; init; } = "JobEnvelope";
     [JsonPropertyName("platformTenantId")] public required string PlatformTenantId { get; init; }
     [JsonPropertyName("directoryTenantId")] public string? DirectoryTenantId { get; init; }
@@ -174,7 +189,8 @@ internal sealed record JobEnvelopeDocument
     public static JobEnvelopeDocument FromEnvelope(
         JobEnvelope job, string status, DateTimeOffset? leaseExpiresAt, int attemptCount) => new()
     {
-        Id = job.JobId.ToString(),
+        Id = $"envelope-{job.JobId}",
+        JobId = job.JobId.ToString(),
         PlatformTenantId = job.PlatformTenantId,
         DirectoryTenantId = job.DirectoryTenantId,
         JobType = job.JobType,
@@ -190,7 +206,7 @@ internal sealed record JobEnvelopeDocument
     };
 
     public JobEnvelope ToEnvelope() => new(
-        Guid.Parse(Id), PlatformTenantId, DirectoryTenantId, JobType, EntityTypeName,
+        Guid.Parse(JobId), PlatformTenantId, DirectoryTenantId, JobType, EntityTypeName,
         TargetEntityId, CorrelationId, DesiredStateHash, CreatedAt,
         JsonDocument.Parse(PayloadJson).RootElement);
 }

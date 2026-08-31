@@ -27,7 +27,7 @@ public sealed class DeployScenarioHandler(
 {
     public string JobType => JobTypes.DeployScenario;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var scenarioId = Guid.Parse(job.EntityId);
         var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
@@ -36,7 +36,7 @@ public sealed class DeployScenarioHandler(
         if (scenario is null)
         {
             logger.LogWarning("DeployScenario: WorkloadScenario {ScenarioId} nicht gefunden.", scenarioId);
-            return;
+            return $"WorkloadScenario {scenarioId} nicht gefunden — nichts deployt.";
         }
 
         var workload = await workloadRepository.GetAsync(tenant, scenario.WorkloadId, ct);
@@ -45,12 +45,14 @@ public sealed class DeployScenarioHandler(
             logger.LogWarning(
                 "DeployScenario: Workload {WorkloadId} für Szenario {ScenarioId} nicht gefunden.",
                 scenario.WorkloadId, scenarioId);
-            return;
+            return $"Workload {scenario.WorkloadId} fuer Szenario '{scenario.Name}' nicht gefunden — nichts deployt.";
         }
 
         var resourcesById = workload.Resources.ToDictionary(r => r.Id);
         var deployedCount = 0;
         var skippedCount = 0;
+        var workloadChanged = false;
+        var deployedResourceNames = new List<string>();
 
         foreach (var rule in scenario.Rules)
         {
@@ -76,24 +78,52 @@ public sealed class DeployScenarioHandler(
             // und stellt sicher, dass die Ziel-Ressource (Gruppe/Team) existiert — ein
             // Szenario-Deployment grant-et keinem einzelnen Gast Zugriff (das bleibt
             // GrantWorkloadRoleHandler vorbehalten), sondern stellt die pro Regel
-            // beschriebene Ressource selbst bereit.
+            // beschriebene Ressource selbst bereit. namePattern nutzt bewusst noch den
+            // (evtl. veralteten) DisplayName-Snapshot bzw. die alte ExternalId nur als
+            // Fallback fuer die Namensbildung beim Connector — massgeblich fuer die
+            // Ressourcen-IDENTITAET ist ausschliesslich die unten zurueckgeschriebene ObjectId.
+            var namePatternSuffix = resource.DisplayName ?? resource.ExternalId ?? resource.Id.ToString();
             var metadata = new Dictionary<string, string>(rule.Fields)
             {
                 ["ScenarioId"] = scenario.Id.ToString(),
                 ["ResourceType"] = resource.ResourceType,
             };
-            await connector.CreateResourceAsync(
+            var namePattern = $"{workload.Name}-{scenario.Name}-{resource.ResourceType}-{namePatternSuffix}";
+            var objectId = await connector.CreateResourceAsync(
                 directoryTenantId: job.DirectoryTenantId ?? string.Empty,
-                namePattern: $"{workload.Name}-{scenario.Name}-{resource.ResourceType}-{resource.ExternalId}",
+                namePattern: namePattern,
                 metadata: metadata,
                 ct);
+
+            // Root-Cause-Fix (Erweiterung 2026-08-31): vorher wurde die von CreateResourceAsync
+            // zurueckgegebene ObjectId verworfen — resource.ExternalId blieb dauerhaft leer/
+            // veraltet, obwohl der Connector die Ressource bereits angelegt hatte. Jetzt wird
+            // die ObjectId als stabile Referenz persistiert, namePattern als DisplayName-
+            // Snapshot uebernommen (siehe WorkloadResource-Kommentar: ExternalId = ObjectId,
+            // DisplayName = informativer Snapshot).
+            if (!string.Equals(resource.ExternalId, objectId, StringComparison.OrdinalIgnoreCase))
+            {
+                resource.ExternalId = objectId;
+                resource.DisplayName = namePattern;
+                workloadChanged = true;
+            }
             deployedCount++;
+            deployedResourceNames.Add(namePattern);
+        }
+
+        if (workloadChanged)
+        {
+            workload.UpdatedAt = DateTimeOffset.UtcNow;
+            await workloadRepository.UpsertAsync(workload, ct);
         }
 
         logger.LogInformation(
             "DeployScenario {ScenarioId} ({Name}): {Deployed} Ressourcen deployt, {Skipped} durch Bedingung " +
             "übersprungen. CorrelationId={CorrelationId}",
             scenarioId, scenario.Name, deployedCount, skippedCount, job.CorrelationId);
+
+        return $"Szenario '{scenario.Name}' auf Workload '{workload.Name}': {deployedCount} Ressource(n) deployt " +
+            $"[{string.Join(", ", deployedResourceNames)}], {skippedCount} durch Bedingung uebersprungen.";
     }
 
     // Fakten-Sammlung für die JSONLogic-Auswertung einer einzelnen Regel ("gather facts,

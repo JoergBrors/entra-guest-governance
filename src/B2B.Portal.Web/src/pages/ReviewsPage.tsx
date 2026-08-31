@@ -30,7 +30,9 @@ export function ReviewsPage() {
   const styles = useStyles();
   const [reviews, setReviews] = useState<ReviewInstance[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
   const [busyItemId, setBusyItemId] = useState<string | null>(null);
+  const [startingDiscovery, setStartingDiscovery] = useState(false);
 
   const reload = () => {
     api.listOpenReviews().then(setReviews).catch((e: Error) => setError(e.message));
@@ -51,15 +53,44 @@ export function ReviewsPage() {
     }
   };
 
+  const startDiscoveryReview = async () => {
+    setError(null);
+    setInfo(null);
+    setStartingDiscovery(true);
+    try {
+      await api.triggerDiscoveryReview();
+      setInfo('Discovery-Review eingereiht — erscheint hier, sobald der Worker sie verarbeitet hat.');
+      reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setStartingDiscovery(false);
+    }
+  };
+
   if (!reviews) return <Spinner label="Lade Reviews…" />;
 
   return (
     <div>
       <Title2>Reviews</Title2>
-      <Text>Laufende interne Review-Instanzen (Snapshot, Keep/Remove).</Text>
+      <Text>
+        Laufende interne Review-Instanzen (Snapshot, Keep/Remove). Discovery-Items zeigen
+        entdeckte Gruppenmitgliedschaften ohne formale Workload-Zuweisung (Actual State) —
+        Keep/Remove klassifiziert diese nur, ändert aber nie automatisch einen Zugriff.
+      </Text>
+      <div style={{ marginTop: 8 }}>
+        <Button size="small" appearance="secondary" disabled={startingDiscovery} onClick={startDiscoveryReview}>
+          Discovery-Review jetzt starten
+        </Button>
+      </div>
       {error && (
         <MessageBar intent="error" style={{ marginTop: 12 }}>
           <MessageBarBody>{error}</MessageBarBody>
+        </MessageBar>
+      )}
+      {info && (
+        <MessageBar intent="success" style={{ marginTop: 12 }}>
+          <MessageBarBody>{info}</MessageBarBody>
         </MessageBar>
       )}
 
@@ -71,7 +102,11 @@ export function ReviewsPage() {
             <Text size={200} block>Provider: {r.provider} · gestartet: {new Date(r.startedAt).toLocaleString('de-DE')}</Text>
             {r.items.map((item) => (
               <div key={item.id} className={styles.itemRow}>
-                <Text size={200}>Assignment {item.assignmentId.slice(0, 8)}</Text>
+                <Text size={200}>
+                  {item.resourceAccessId
+                    ? `Discovery: ${item.resourceAccessId.slice(0, 8)}`
+                    : `Assignment ${item.assignmentId?.slice(0, 8) ?? '—'}`}
+                </Text>
                 {item.reason && <Text size={200} className={styles.reason}>{item.reason}</Text>}
                 <Badge color={decisionColor[item.decision]}>{item.decision}</Badge>
                 {item.decision === 'Pending' && (
@@ -82,9 +117,11 @@ export function ReviewsPage() {
                     <Button size="small" disabled={busyItemId === item.id} onClick={() => decide(r.id, item.id, 'Remove')}>
                       Remove
                     </Button>
-                    <Button size="small" disabled={busyItemId === item.id} onClick={() => decide(r.id, item.id, 'Escalated')}>
-                      Escalate
-                    </Button>
+                    {!item.resourceAccessId && (
+                      <Button size="small" disabled={busyItemId === item.id} onClick={() => decide(r.id, item.id, 'Escalated')}>
+                        Escalate
+                      </Button>
+                    )}
                   </div>
                 )}
               </div>

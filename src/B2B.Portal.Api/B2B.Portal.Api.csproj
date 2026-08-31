@@ -10,4 +10,11 @@
     <ProjectReference Include="..\B2B.Portal.Infrastructure\B2B.Portal.Infrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- JWT-Bearer-Middleware fuer die Validierung der von B2B.Portal.Infrastructure
+         ausgestellten Tokens (siehe Auth/IdentityProviderConfig.cs). Nur die Middleware
+         lebt hier, die Token-Ausstellung selbst liegt in Infrastructure. -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
+  </ItemGroup>
+
 </Project>

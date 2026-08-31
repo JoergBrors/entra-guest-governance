@@ -82,9 +82,9 @@ export function WorkloadsAdminPage() {
   const [editPatterns, setEditPatterns] = useState('');
 
   const [roleForm, setRoleForm] = useState<Record<string, { name: string; mappings: string; applicationId: string; applicationRoleId: string }>>({});
-  const [resourceForm, setResourceForm] = useState<Record<string, { type: string; externalId: string }>>({});
+  const [resourceForm, setResourceForm] = useState<Record<string, { type: string; externalId: string; displayName: string }>>({});
   const [editingRole, setEditingRole] = useState<{ workloadId: string; roleId: string; name: string; applicationId: string; applicationRoleId: string; resourceMappings: string[] } | null>(null);
-  const [editingResource, setEditingResource] = useState<{ workloadId: string; resourceId: string; resourceType: string; externalId: string } | null>(null);
+  const [editingResource, setEditingResource] = useState<{ workloadId: string; resourceId: string; resourceType: string; externalId: string; displayName: string } | null>(null);
   const [attachGroupForm, setAttachGroupForm] = useState<Record<string, string>>({});
   const [patternValidation, setPatternValidation] = useState<Record<string, PatternValidationResult>>({});
   const [newWorkloadName, setNewWorkloadName] = useState('');
@@ -272,8 +272,8 @@ export function WorkloadsAdminPage() {
     const form = resourceForm[workloadId];
     if (!form?.type) return;
     try {
-      await api.createWorkloadResource(workloadId, form.type, form.externalId || null);
-      setResourceForm((prev) => ({ ...prev, [workloadId]: { type: '', externalId: '' } }));
+      await api.createWorkloadResource(workloadId, form.type, form.externalId || null, form.displayName || null);
+      setResourceForm((prev) => ({ ...prev, [workloadId]: { type: '', externalId: '', displayName: '' } }));
       reload();
     } catch (e) {
       setError((e as Error).message);
@@ -286,6 +286,7 @@ export function WorkloadsAdminPage() {
       resourceId: resource.id,
       resourceType: resource.resourceType,
       externalId: resource.externalId ?? '',
+      displayName: resource.displayName ?? '',
     });
   };
 
@@ -298,6 +299,7 @@ export function WorkloadsAdminPage() {
         editingResource.resourceId,
         editingResource.resourceType,
         editingResource.externalId || null,
+        editingResource.displayName || null,
       );
       setEditingResource(null);
       reload();
@@ -312,7 +314,14 @@ export function WorkloadsAdminPage() {
     if (!group) return;
     setError(null);
     try {
-      await api.attachWorkloadResource(workloadId, group.resourceProvisioningOptions.includes('Team') ? 'Team' : group.groupTypes.includes('Unified') ? 'M365Group' : 'SecurityGroup', group.displayName);
+      // externalId ist immer die stabile Entra-Object-ID (group.objectId), niemals der
+      // Anzeigename — der wandert separat als displayName mit (siehe WorkloadResource-Typ).
+      await api.attachWorkloadResource(
+        workloadId,
+        group.resourceProvisioningOptions.includes('Team') ? 'Team' : group.groupTypes.includes('Unified') ? 'M365Group' : 'SecurityGroup',
+        group.objectId,
+        group.displayName,
+      );
       setAttachGroupForm((prev) => ({ ...prev, [workloadId]: '' }));
       reload();
     } catch (e) {
@@ -477,11 +486,18 @@ export function WorkloadsAdminPage() {
                 {patternSyncStatus[w.id] && (
                   <PatternSyncStatusView state={patternSyncStatus[w.id]} />
                 )}
-                <Text className={styles.meta} block size={200}>
+                <Text className={styles.meta} block size={200} title="Aktiv/Inaktiv basieren auf der tatsächlichen Gruppenmitgliedschaft im Verzeichnis, nicht nur auf formalen Zuweisungen.">
                   Nutzer: {counts[w.id] ? (
                     <>Aktiv {counts[w.id].active} / Inaktiv {counts[w.id].inactive}</>
                   ) : '…'}
                 </Text>
+                {counts[w.id]?.sharedWith != null && counts[w.id]!.sharedWith!.length > 0 && (
+                  <Text className={styles.meta} block size={200} style={{ color: tokens.colorPaletteMarigoldForeground1 }}>
+                    Ressource(n) geteilt mit: {counts[w.id]!.sharedWith!.map((s) => `${s.resourceDisplayName} → ${s.otherWorkloadNames.join(', ')}`).join('; ')}
+                    {' '}— manche gezählten Nutzer stammen ggf. aus diesen Workloads, siehe{' '}
+                    <Button appearance="transparent" size="small" onClick={() => navigate('/reviews')}>Reviews</Button>
+                  </Text>
+                )}
               </>
             )}
 
@@ -509,7 +525,7 @@ export function WorkloadsAdminPage() {
               ))}
               {w.resources.map((res) => (
                 <Badge key={res.id} appearance="outline" color={res.managed ? 'success' : 'warning'}>
-                  {res.resourceType}{res.externalId ? `:${res.externalId}` : ''}{resourceMatchesWorkloadPattern(res, w) && ' (Pattern-Treffer)'}{!res.managed && ' (discovered)'}
+                  {res.resourceType}:{res.displayName ?? res.externalId ?? res.id}{resourceMatchesWorkloadPattern(res, w) && ' (Pattern-Treffer)'}{!res.managed && ' (discovered)'}
                   <Button
                     appearance="transparent"
                     size="small"
@@ -569,7 +585,7 @@ export function WorkloadsAdminPage() {
                     {w.resources.map((resource) => (
                       <Checkbox
                         key={resource.id}
-                        label={`${resource.resourceType}:${resource.externalId ?? resource.id}`}
+                        label={`${resource.resourceType}:${resource.displayName ?? resource.externalId ?? resource.id}`}
                         checked={editingRole.resourceMappings.includes(resource.id)}
                         onChange={(_, data) => setEditingRole((prev) => {
                           if (!prev) return prev;
@@ -595,10 +611,16 @@ export function WorkloadsAdminPage() {
                     onChange={(_, d) => setEditingResource((prev) => prev ? { ...prev, resourceType: d.value } : prev)}
                   />
                 </Field>
-                <Field label="ExternalId">
+                <Field label="ExternalId (Entra Object ID)">
                   <Input
                     value={editingResource.externalId}
                     onChange={(_, d) => setEditingResource((prev) => prev ? { ...prev, externalId: d.value } : prev)}
+                  />
+                </Field>
+                <Field label="Anzeigename">
+                  <Input
+                    value={editingResource.displayName}
+                    onChange={(_, d) => setEditingResource((prev) => prev ? { ...prev, displayName: d.value } : prev)}
                   />
                 </Field>
                 <Button appearance="primary" size="small" onClick={handleSaveResource} disabled={!editingResource.resourceType}>Speichern</Button>
@@ -677,12 +699,17 @@ export function WorkloadsAdminPage() {
               <Input
                 placeholder="ResourceType (z.B. SecurityGroup)"
                 value={resourceForm[w.id]?.type ?? ''}
-                onChange={(_, d) => setResourceForm((prev) => ({ ...prev, [w.id]: { type: d.value, externalId: prev[w.id]?.externalId ?? '' } }))}
+                onChange={(_, d) => setResourceForm((prev) => ({ ...prev, [w.id]: { type: d.value, externalId: prev[w.id]?.externalId ?? '', displayName: prev[w.id]?.displayName ?? '' } }))}
               />
               <Input
-                placeholder="ExternalId (optional)"
+                placeholder="ExternalId / Entra Object ID (optional)"
                 value={resourceForm[w.id]?.externalId ?? ''}
-                onChange={(_, d) => setResourceForm((prev) => ({ ...prev, [w.id]: { type: prev[w.id]?.type ?? '', externalId: d.value } }))}
+                onChange={(_, d) => setResourceForm((prev) => ({ ...prev, [w.id]: { type: prev[w.id]?.type ?? '', externalId: d.value, displayName: prev[w.id]?.displayName ?? '' } }))}
+              />
+              <Input
+                placeholder="Anzeigename (optional)"
+                value={resourceForm[w.id]?.displayName ?? ''}
+                onChange={(_, d) => setResourceForm((prev) => ({ ...prev, [w.id]: { type: prev[w.id]?.type ?? '', externalId: prev[w.id]?.externalId ?? '', displayName: d.value } }))}
               />
               <Button size="small" onClick={() => handleAddResource(w.id)}>Hinzufügen</Button>
             </div>
@@ -887,10 +914,12 @@ function applicationRoleName(appId: string | null | undefined, roleId: string, a
 }
 
 function resourceMatchesWorkloadPattern(resource: WorkloadResource, workload: Workload): boolean {
-  if (!resource.externalId) return false;
+  // Patterns werden von Admins gegen Anzeigenamen geschrieben (z.B. "SG-MERIDIAN-*"), nie
+  // gegen die opake Object-ID — daher Abgleich gegen displayName, nicht externalId.
+  if (!resource.displayName) return false;
   return (workload.resourceNamePatterns ?? []).some((pattern) => {
     try {
-      return matchesPattern(resource.externalId!, pattern);
+      return matchesPattern(resource.displayName!, pattern);
     } catch {
       return false;
     }

@@ -40,13 +40,26 @@ public sealed class WorkloadRole
     public List<Guid> ResourceMappings { get; init; } = new();
 }
 
-/// <summary>Technische Ressource, die einer Workload-Rolle zugeordnet werden kann.</summary>
+/// <summary>
+/// Technische Ressource, die einer Workload-Rolle zugeordnet werden kann.
+///
+/// ExternalId ist IMMER die stabile Entra-Object-ID der referenzierten Ressource (z.B. einer
+/// Mock-Entra-Gruppe), NIE ihr Anzeigename (Erweiterung 2026-08-31 "EntraId-Persistenz +
+/// Object-ID-Referenzierung"; vorher schrieb SyncWorkloadPatternResourcesHandler hier
+/// group.DisplayName hinein, was bei einer Gruppen-Umbenennung im Verzeichnis zu einer toten
+/// Referenz gefuehrt haette, da DisplayNames im Gegensatz zur ObjectId nicht stabil sind).
+/// DisplayName ist ein rein informativer Snapshot fuer die Admin-UI (WorkloadsAdminPage,
+/// ScenariosPage) und fuer den ResourceNamePatterns-Abgleich (SyncWorkloadPatternResourcesHandler)
+/// — er kann veralten, wenn die Ressource im Verzeichnis umbenannt wird, ohne dass ein erneuter
+/// Sync gelaufen ist, ist aber fuer die Zugriffssteuerung selbst nie massgeblich.
+/// </summary>
 public sealed class WorkloadResource
 {
     public Guid Id { get; init; } = Guid.NewGuid();
     public required Guid WorkloadId { get; init; }
     public required string ResourceType { get; set; } // z.B. SecurityGroup, M365Group, Team, AppRole
     public string? ExternalId { get; set; }
+    public string? DisplayName { get; set; }
     public bool Managed { get; set; } = true; // true = vom Portal verwaltet, false = discovered
 }
 

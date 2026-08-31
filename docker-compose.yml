@@ -4,7 +4,6 @@ x-portal-env: &portal-env
   B2B_MODE: LOCAL_MOCK
   DIRECTORY_PROVIDER: mock
   EMAIL_PROVIDER: mock
-  DATA_PROVIDER: cosmos
   JOB_QUEUE_PROVIDER: cosmos
   ALLOW_GRAPH_WRITES: "false"
   ALLOW_GUEST_DELETE: "false"
@@ -13,6 +12,10 @@ x-portal-env: &portal-env
   COSMOS_EMULATOR_ALLOW_INSECURE_TLS: "true"
   COSMOS_DATABASE_ID: b2b-governance-dev
   VITE_DEV_PLATFORM_TENANT_ID: dev-tenant-a
+  # Fester Dev-Key statt automatisch generiertem Ephemeral-Key (siehe IdentityProviderConfig):
+  # ohne diesen Wert wuerde jeder "docker compose restart api" alle zuvor ausgestellten
+  # Mock-Login-JWTs ungueltig machen. Reiner Dev-/Compose-Wert, kein echtes Secret.
+  JWT_SIGNING_KEY: dev-only-jwt-signing-key-not-a-real-secret-change-for-prod-32chars
 
 services:
   cosmos:
@@ -106,11 +109,15 @@ services:
       - sh
       - -c
       - >
+        set -e;
+        TOKEN=$$(curl -sf -X POST http://api:8080/api/auth/mock/login
+        -H 'Content-Type: application/json'
+        --data '{"mail":"admin@platform.example"}'
+        | sed -n 's/.*"token":"\([^"]*\)".*/\1/p');
+        if [ -z "$$TOKEN" ]; then echo "Login fehlgeschlagen - existiert admin@platform.example im Mock-Entra-Stamm? (siehe docker/cosmos-init.ps1)" >&2; exit 1; fi;
         curl -f -X POST http://api:8080/api/dev/seed/large-workload
         -H 'Content-Type: application/json'
-        -H 'X-Platform-Tenant-Id: dev-tenant-a'
-        -H 'X-Portal-User-Mail: admin@platform.example'
-        -H 'X-Portal-Roles: GovernanceAdmin,User,Reviewer'
+        -H "Authorization: Bearer $$TOKEN"
         --data '{"guestCount":120,"workloadName":"Demo Governance Workload"}'
     restart: "no"
 

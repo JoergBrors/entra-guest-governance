@@ -8,26 +8,24 @@ import type {
   MockEntraApplication, MockEntraApplicationSignIn, MockEntraGroup, MockEntraMembership, MockEntraUser,
   ScenarioUser,
   WorkloadMutationResponse,
+  GuestAccountState,
+  ReminderPolicy, ReminderStage, ReminderStagePreview, MailSinkEntry,
+  WorkerControlState,
 } from '../types/domain';
+import { getToken } from '../auth/token';
 
-// API_BASE_URL und der Platform-Tenant kommen aus Vite-Env-Variablen (siehe .env.example
-// im Repository-Root -> für das Frontend gespiegelt via VITE_-Präfix, kein Hardcoding).
+// API_BASE_URL kommt aus Vite-Env-Variablen (siehe .env.example im Repository-Root ->
+// für das Frontend gespiegelt via VITE_-Präfix, kein Hardcoding).
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:5000';
 
-// Im MVP/LOCAL_MOCK wird der Platform-Tenant clientseitig aus der lokalen Konfiguration
-// gelesen. In DEV_INTEGRATION/AZURE_DEV übernimmt MSAL/Entra-Login diese Rolle — die
-// Serverseite validiert den Tenant-Kontext ohnehin unabhängig vom Client (siehe
-// B2B.Portal.Api ITenantContextAccessor).
-const DEV_PLATFORM_TENANT_ID = import.meta.env.VITE_DEV_PLATFORM_TENANT_ID ?? 'dev-tenant-a';
-const DEV_PORTAL_USER_MAIL = import.meta.env.VITE_DEV_PORTAL_USER_MAIL ?? 'admin@platform.example';
-const DEV_PORTAL_ROLES = import.meta.env.VITE_DEV_PORTAL_ROLES ?? 'GovernanceAdmin,User,Reviewer';
-
-function devPortalUserMail(): string {
-  return localStorage.getItem('portal-user-mail') ?? DEV_PORTAL_USER_MAIL;
-}
-
-function devPortalRoles(): string {
-  return localStorage.getItem('portal-user-roles') ?? DEV_PORTAL_ROLES;
+// Erweiterung 2026-08-30: Identität/Tenant kommen nicht mehr aus freien X-Portal-*-Headern,
+// sondern aus dem serverseitig validierten JWT (siehe auth/token.ts, B2B.Portal.Api
+// ClaimsPortalUserContextAccessor/ClaimsTenantContextAccessor). Ohne Token wird kein
+// Authorization-Header gesendet — der Server antwortet dann mit 401, die App-Routing-Ebene
+// (App.tsx) leitet in diesem Fall auf /login um.
+function authHeader(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 function devThemeHeader(): Record<string, string> {
@@ -40,9 +38,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      'X-Platform-Tenant-Id': DEV_PLATFORM_TENANT_ID,
-      'X-Portal-User-Mail': devPortalUserMail(),
-      'X-Portal-Roles': devPortalRoles(),
+      ...authHeader(),
       ...devThemeHeader(),
       ...(init?.headers ?? {}),
     },
@@ -60,11 +56,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(message);
   }
 
-  if (response.status === 202 || response.status === 204 || response.headers.get('content-length') === '0') {
+  // 204 hat per HTTP-Spezifikation nie einen Body. 202 KANN einen Body haben (z.B. dieser
+  // Trigger-Endpoint liefert { message, state } zurueck) — vorher wurde hier pauschal
+  // undefined zurueckgegeben, was bei jedem 202-Response MIT Body zu "Cannot read properties
+  // of undefined" beim Aufrufer fuehrte (siehe WorkerOverviewPage.handleTriggerWorker).
+  // content-length fehlt bei manchen Antworten (z.B. chunked/ohne expliziten Header), daher
+  // zusaetzlich versuchen zu parsen und nur bei leerem Body wirklich undefined liefern.
+  if (response.status === 204) {
     return undefined as T;
   }
 
-  return (await response.json()) as T;
+  const text = await response.text();
+  if (!text) {
+    return undefined as T;
+  }
+  return JSON.parse(text) as T;
 }
 
 /** Wie request(), aber ohne Content-Type-Header — der Browser setzt bei FormData die
@@ -75,9 +81,7 @@ async function requestForm<T>(path: string, form: FormData): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: 'POST',
     headers: {
-      'X-Platform-Tenant-Id': DEV_PLATFORM_TENANT_ID,
-      'X-Portal-User-Mail': devPortalUserMail(),
-      'X-Portal-Roles': devPortalRoles(),
+      ...authHeader(),
       ...devThemeHeader(),
     },
     body: form,
@@ -116,8 +120,25 @@ export const api = {
   listJobs: () => request<JobStatusResponse[]>('/api/jobs'),
   getJobStatus: (jobId: string) => request<JobStatusResponse>(`/api/jobs/${jobId}`),
   stopJob: (jobId: string) => request<JobStatusResponse>(`/api/jobs/${jobId}/stop`, { method: 'POST' }),
+  restartJob: (jobId: string) => request<JobStatusResponse>(`/api/jobs/${jobId}/restart`, { method: 'POST' }),
+  triggerDiscovery: () => request<JobStatusResponse>('/api/jobs/trigger/discovery', { method: 'POST' }),
+  triggerReconciliation: () =>
+    request<{ queuedJobCount: number; jobIds: string[] }>('/api/jobs/trigger/reconciliation', { method: 'POST' }),
+  listWorkers: () => request<WorkerControlState[]>('/api/dev/workers'),
+  pauseWorker: (workerName: string) =>
+    request<WorkerControlState>(`/api/dev/workers/${encodeURIComponent(workerName)}/pause`, { method: 'POST' }),
+  resumeWorker: (workerName: string) =>
+    request<WorkerControlState>(`/api/dev/workers/${encodeURIComponent(workerName)}/resume`, { method: 'POST' }),
+  triggerWorker: (workerName: string) =>
+    request<{ message: string; state: WorkerControlState }>(`/api/dev/workers/${encodeURIComponent(workerName)}/trigger`, { method: 'POST' }),
   uiConfiguration: () => request<UiConfiguration>('/api/ui/configuration'),
   myNavigation: () => request<{ items: string[] }>('/api/me/navigation'),
+  mockLogin: (mail: string) =>
+    request<{ token: string; mail: string; roles: string[]; platformTenantId: string }>('/api/auth/mock/login', {
+      method: 'POST',
+      body: JSON.stringify({ mail }),
+    }),
+  mockLogout: () => request<void>('/api/auth/mock/logout', { method: 'POST' }),
   listMockEntraUsers: () => request<MockEntraUser[]>('/api/dev/mock-entra/users'),
   listMockEntraLoginUsers: () => request<MockEntraUser[]>('/api/dev/mock-entra/login-users'),
   upsertMockEntraUser: (user: Partial<MockEntraUser> & Pick<MockEntraUser, 'mail' | 'displayName'>) =>
@@ -162,10 +183,29 @@ export const api = {
   listMockEntraApplicationSignIns: (appId?: string | null) =>
     request<MockEntraApplicationSignIn[]>(`/api/dev/mock-entra/application-signins${appId ? `?appId=${encodeURIComponent(appId)}` : ''}`),
 
-  listGuests: () => request<GuestAccount[]>('/api/guest-accounts'),
+  // Erweiterung 2026-08-30 "Guest Pool Filter": optionale Filter werden als Query-Parameter
+  // angehaengt und serverseitig ausgewertet (siehe FilterGuestsAsync, Program.cs).
+  listGuests: (filter?: {
+    workloadId?: string; scenarioId?: string; accountState?: GuestAccountState; invitationStatus?: 'accepted' | 'pending';
+  }) => {
+    const params = new URLSearchParams();
+    if (filter?.workloadId) params.set('workloadId', filter.workloadId);
+    if (filter?.scenarioId) params.set('scenarioId', filter.scenarioId);
+    if (filter?.accountState) params.set('accountState', filter.accountState);
+    if (filter?.invitationStatus) params.set('invitationStatus', filter.invitationStatus);
+    const query = params.toString();
+    return request<GuestAccount[]>(`/api/guest-accounts${query ? `?${query}` : ''}`);
+  },
   getGuest: (id: string) => request<GuestAccount>(`/api/guest-accounts/${id}`),
   listGuestAssignments: (guestId: string) =>
     request<GuestWorkloadAssignment[]>(`/api/guest-accounts/${guestId}/assignments`),
+  resendInvitation: (guestId: string) =>
+    request<{ jobId: string }>(`/api/guest-accounts/${guestId}/resend-invitation`, { method: 'POST' }),
+
+  // Erweiterung 2026-08-30 "Scoped Visibility fuer Workload-/Scenario-Owner": dieselbe
+  // gefilterte Gaesteliste wie listGuests, aber serverseitig auf die eigenen Workloads
+  // beschraenkt (siehe GET /api/me/managed-guests) — kein GovernanceAdmin noetig.
+  listManagedGuests: () => request<GuestAccount[]>('/api/me/managed-guests'),
 
   listWorkloads: () => request<Workload[]>('/api/workloads'),
   listMyWorkloads: () => request<Workload[]>('/api/me/workloads'),
@@ -224,32 +264,33 @@ export const api = {
   deleteWorkloadRole: (workloadId: string, roleId: string) =>
     request<void>(`/api/workloads/${workloadId}/roles/${roleId}`, { method: 'DELETE' }),
 
-  createWorkloadResource: (workloadId: string, resourceType: string, externalId: string | null) =>
+  createWorkloadResource: (workloadId: string, resourceType: string, externalId: string | null, displayName?: string | null) =>
     request<WorkloadResource>(`/api/workloads/${workloadId}/resources`, {
       method: 'POST',
-      body: JSON.stringify({ resourceType, externalId }),
+      body: JSON.stringify({ resourceType, externalId, displayName }),
     }),
 
-  updateWorkloadResource: (workloadId: string, resourceId: string, resourceType: string, externalId: string | null) =>
+  updateWorkloadResource: (workloadId: string, resourceId: string, resourceType: string, externalId: string | null, displayName?: string | null) =>
     request<WorkloadResource>(`/api/workloads/${workloadId}/resources/${resourceId}`, {
       method: 'PUT',
-      body: JSON.stringify({ resourceType, externalId }),
+      body: JSON.stringify({ resourceType, externalId, displayName }),
     }),
 
   deleteWorkloadResource: (workloadId: string, resourceId: string) =>
     request<void>(`/api/workloads/${workloadId}/resources/${resourceId}`, { method: 'DELETE' }),
 
   listOpenReviews: () => request<ReviewInstance[]>('/api/reviews'),
+  triggerDiscoveryReview: () => request<JobStatusResponse>('/api/reviews/trigger/discovery', { method: 'POST' }),
   decideReviewItem: (reviewInstanceId: string, reviewItemId: string, decision: 'Keep' | 'Remove' | 'Escalated') =>
     request<void>(`/api/reviews/${reviewInstanceId}/items/${reviewItemId}/decision`, {
       method: 'POST',
       body: JSON.stringify({ decision }),
     }),
 
-  attachWorkloadResource: (workloadId: string, resourceType: string, externalId: string) =>
+  attachWorkloadResource: (workloadId: string, resourceType: string, externalId: string, displayName?: string | null) =>
     request<WorkloadResource>(`/api/workloads/${workloadId}/resources/attach`, {
       method: 'POST',
-      body: JSON.stringify({ resourceType, externalId }),
+      body: JSON.stringify({ resourceType, externalId, displayName }),
     }),
 
   listAuditEvents: () => request<AuditEvent[]>('/api/audit-events'),
@@ -318,4 +359,18 @@ export const api = {
     form.append('mapping', mappingToFormValue(mapping));
     return requestForm<GuestImportResult>('/api/guest-import/commit', form);
   },
+
+  getReminderPolicy: () => request<ReminderPolicy>('/api/reminder-policy'),
+  updateReminderPolicy: (stages: ReminderStage[]) =>
+    request<ReminderPolicy>('/api/reminder-policy', {
+      method: 'PUT',
+      body: JSON.stringify({ stages }),
+    }),
+  previewReminderStage: (templateSubject: string, templateBody: string) =>
+    request<ReminderStagePreview>('/api/reminder-policy/preview', {
+      method: 'POST',
+      body: JSON.stringify({ templateSubject, templateBody }),
+    }),
+
+  listMailSink: () => request<MailSinkEntry[]>('/api/dev/mail-sink'),
 };

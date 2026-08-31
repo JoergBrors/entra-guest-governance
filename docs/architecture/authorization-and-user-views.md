@@ -1,6 +1,6 @@
 # Authorization And User Views
 
-Stand: 2026-08-29
+Stand: 2026-08-30
 
 ## Fachliche Fakten aus der Freigabe
 
@@ -24,11 +24,14 @@ Stand: 2026-08-29
 
 ## LOCAL_MOCK
 
-Der MVP nutzt Header als Dev-Kontext:
+Erweiterung 2026-08-30: der PortalUserContext/TenantContext wird nicht mehr aus freien
+Client-Headern gelesen, sondern aus einem validierten JWT (`ClaimsPortalUserContextAccessor`,
+`ClaimsTenantContextAccessor`), ausgestellt vom EntraIdMock-Identity-Provider
+(`POST /api/auth/mock/login`, siehe `docs/development/local-mock.md`). Relevante Claims:
 
-- `X-Portal-User-Mail`
-- `X-Portal-Roles`
-- `X-Scenario-Manager-Workload-Ids`
+- `email` — Mail des angemeldeten Benutzers.
+- `role` (mehrfach) — eine der `PortalRoles`-Konstanten je Claim.
+- `platformTenantId` — aus dem gewaehlten Mock-User abgeleitet.
+- `scenarioManagerWorkloadId` (mehrfach) — serverseitig aus `WorkloadScenario.ScenarioManagers` abgeleitet.
 
-Produktive Token-/Claim-Ableitung: `integration pending`.
-
+Produktive Token-/Claim-Ableitung gegen einen echten Entra-Tenant (`IdentityProviderKind.EntraId`): `integration pending`.
