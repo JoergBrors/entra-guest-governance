@@ -113,14 +113,25 @@ export interface WorkloadMutationResponse {
   patternSyncJobId?: string | null;
 }
 
+export interface SharedResourceInfo {
+  resourceDisplayName: string;
+  otherWorkloadNames: string[];
+}
+
 export interface WorkloadAssignmentCounts {
+  /** Ist-Größe: tatsächlich Gruppenmitglied UND (kein Assignment nötig ODER Einladung
+   * angenommen UND Assignment nicht Revoked). */
   active: number;
+  /** Ist-Größe: Assignment ohne angenommene Einladung, ODER Assignment revoked aber Person
+   * ist noch tatsächlich Gruppenmitglied (Revoke-Job hat noch nicht gegriffen). */
   inactive: number;
-  /** Anzahl eindeutiger Entra-Objekte, die tatsächlich Mitglied einer Gruppen-/Team-Ressource
-   * dieses Workload im Mock-Entra-Verzeichnis sind (Ist-Zustand) — kann von active+inactive
-   * abweichen, wenn jemand ausserhalb des Portal-Workflows Mitglied wurde. null, wenn der
-   * Workload keine Gruppen-Ressourcen hat oder das Verzeichnis nicht verfügbar ist. */
+  /** Gesamtzahl eindeutiger Entra-Objekte, die tatsächlich Mitglied einer Gruppen-/Team-
+   * Ressource dieses Workload sind — kann höher als active+inactive sein, wenn dem Portal
+   * unbekannte Gäste Mitglied sind. */
   directoryMemberCount?: number | null;
+  /** Ressourcen dieses Workload, die auch von anderen Workloads genutzt werden — erklärt,
+   * woher zusätzliche Mitglieder stammen können. */
+  sharedWith?: SharedResourceInfo[] | null;
 }
 
 export type AssignmentStatus =

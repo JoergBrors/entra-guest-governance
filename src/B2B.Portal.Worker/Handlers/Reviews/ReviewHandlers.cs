@@ -95,21 +95,37 @@ public sealed class StartReviewHandler(
             // die stabile Entra-Object-ID (siehe WorkloadResource-Kommentar), genau wie
             // ResourceAccess.ExternalResourceId (DiscoveryHandler schreibt dort
             // DirectoryGroupMembership.GroupId hinein) — beide vergleichbar, um dem Admin in
-            // der Reason zu sagen, WELCHER Workload betroffen ist, statt nur eine rohe
-            // Object-ID zu zeigen.
+            // der Reason zu sagen, WELCHER Workload (und dessen Owner, siehe unten) betroffen
+            // ist, statt nur eine rohe Object-ID zu zeigen. ALLE Workloads sammeln, die eine
+            // Ressource nutzen (nicht nur den ersten Treffer) — eine Gruppe kann von mehreren
+            // Workloads geteilt werden (Erweiterung 2026-08-31 "Geteilte Gruppen"), dann ist
+            // potenziell mehr als ein Owner fuer die Klaerung zustaendig.
             var workloads = await workloadRepository.ListAsync(tenant, ct);
-            var workloadByExternalId = workloads
+            var matchesByExternalId = workloads
                 .SelectMany(w => w.Resources.Select(r => (Workload: w, Resource: r)))
                 .Where(x => !string.IsNullOrWhiteSpace(x.Resource.ExternalId))
                 .GroupBy(x => x.Resource.ExternalId!, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+                .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
 
             foreach (var access in unclassified)
             {
-                var reason = workloadByExternalId.TryGetValue(access.ExternalResourceId, out var match)
-                    ? $"Mitglied von {match.Resource.ResourceType}:{match.Resource.DisplayName ?? match.Resource.ExternalId} " +
-                        $"(Workload '{match.Workload.Name}') — keine Workload-Zuweisung fuer diesen Gast gefunden."
-                    : $"Mitglied von {access.ResourceType}:{access.ExternalResourceId} — keinem bekannten Workload zugeordnet.";
+                string reason;
+                if (matchesByExternalId.TryGetValue(access.ExternalResourceId, out var matches) && matches.Count > 0)
+                {
+                    var resourceLabel = $"{matches[0].Resource.ResourceType}:{matches[0].Resource.DisplayName ?? matches[0].Resource.ExternalId}";
+                    // Owner ohne konfigurierten Wert wird bewusst als "kein Owner hinterlegt"
+                    // statt stillschweigend uebersprungen ausgewiesen — sonst bliebe unklar,
+                    // WER die "Gast zuweisen"-Entscheidung treffen soll (Nutzeranforderung:
+                    // "Owner in die Review geben", damit klar ist, wer verantwortlich ist).
+                    var ownerList = string.Join(", ", matches.Select(m =>
+                        $"{m.Workload.Name} (Owner: {(string.IsNullOrWhiteSpace(m.Workload.Owner) ? "kein Owner hinterlegt" : m.Workload.Owner)})"));
+                    reason = $"Mitglied von {resourceLabel} — keine Workload-Zuweisung fuer diesen Gast gefunden. " +
+                        $"Betroffene(r) Workload(s): {ownerList}. Zuweisung muss bewusst durch den/die Owner erfolgen.";
+                }
+                else
+                {
+                    reason = $"Mitglied von {access.ResourceType}:{access.ExternalResourceId} — keinem bekannten Workload zugeordnet.";
+                }
 
                 instance.Items.Add(new ReviewItem
                 {

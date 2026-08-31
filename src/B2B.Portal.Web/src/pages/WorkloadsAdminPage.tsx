@@ -486,22 +486,16 @@ export function WorkloadsAdminPage() {
                 {patternSyncStatus[w.id] && (
                   <PatternSyncStatusView state={patternSyncStatus[w.id]} />
                 )}
-                <Text className={styles.meta} block size={200}>
-                  Zuweisungen: {counts[w.id] ? (
+                <Text className={styles.meta} block size={200} title="Aktiv/Inaktiv basieren auf der tatsächlichen Gruppenmitgliedschaft im Verzeichnis, nicht nur auf formalen Zuweisungen.">
+                  Nutzer: {counts[w.id] ? (
                     <>Aktiv {counts[w.id].active} / Inaktiv {counts[w.id].inactive}</>
                   ) : '…'}
                 </Text>
-                {counts[w.id]?.directoryMemberCount != null && (
-                  <Text
-                    className={styles.meta}
-                    block
-                    size={200}
-                    style={counts[w.id].directoryMemberCount! > counts[w.id].active ? { color: tokens.colorPaletteMarigoldForeground1 } : undefined}
-                  >
-                    Mitglieder im Verzeichnis: {counts[w.id].directoryMemberCount}
-                    {counts[w.id].directoryMemberCount! > counts[w.id].active && (
-                      <> — mehr als formal zugewiesen, siehe <Button appearance="transparent" size="small" onClick={() => navigate('/reviews')}>Reviews</Button></>
-                    )}
+                {counts[w.id]?.sharedWith != null && counts[w.id]!.sharedWith!.length > 0 && (
+                  <Text className={styles.meta} block size={200} style={{ color: tokens.colorPaletteMarigoldForeground1 }}>
+                    Ressource(n) geteilt mit: {counts[w.id]!.sharedWith!.map((s) => `${s.resourceDisplayName} → ${s.otherWorkloadNames.join(', ')}`).join('; ')}
+                    {' '}— manche gezählten Nutzer stammen ggf. aus diesen Workloads, siehe{' '}
+                    <Button appearance="transparent" size="small" onClick={() => navigate('/reviews')}>Reviews</Button>
                   </Text>
                 )}
               </>
