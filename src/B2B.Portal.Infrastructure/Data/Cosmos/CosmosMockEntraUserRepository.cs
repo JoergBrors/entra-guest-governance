@@ -6,17 +6,19 @@ using Microsoft.Azure.Cosmos;
 namespace B2B.Portal.Infrastructure.Data.Cosmos;
 
 /// <summary>
-/// Cosmos-Implementierung von IMockEntraUserRepository, Container "discovery" (geteilt mit
-/// CosmosResourceAccessRepository — disambiguiert per entityType, dasselbe Muster wie
-/// CosmosJobRepository/CosmosJobQueue im Container "jobs"). Persistiert Mock-Entra-Benutzer
-/// inkl. PortalRoles (Erweiterung 2026-08-30 (Teil 3): vorher lebten diese nur im
-/// In-Memory-Singleton MockEntraDirectoryStore und gingen bei jedem API-Neustart verloren —
-/// insbesondere die einzige Quelle fuer "wer ist GovernanceAdmin").
+/// Cosmos-Implementierung von IMockEntraUserRepository, dedizierter Container "entraid"
+/// (Erweiterung 2026-08-31 "EntraId-Persistenz": vorher im geteilten Container "discovery"
+/// untergebracht, jetzt eigener Container fuer den gesamten Mock-Entra-Verzeichnis-Bestand —
+/// disambiguiert weiterhin per entityType, geteilt mit CosmosMockEntraDirectoryRepository,
+/// dasselbe Muster wie CosmosJobRepository/CosmosJobQueue im Container "jobs"). Persistiert
+/// Mock-Entra-Benutzer inkl. PortalRoles (Erweiterung 2026-08-30 (Teil 3): vorher lebten diese
+/// nur im In-Memory-Singleton MockEntraDirectoryStore und gingen bei jedem API-Neustart
+/// verloren — insbesondere die einzige Quelle fuer "wer ist GovernanceAdmin").
 /// </summary>
 public sealed class CosmosMockEntraUserRepository(CosmosClientFactory factory) : IMockEntraUserRepository
 {
     private const string EntityType = "MockEntraUser";
-    private Container Container => factory.GetContainer("discovery");
+    private Container Container => factory.GetContainer("entraid");
 
     public async Task<IReadOnlyList<MockEntraUserRecord>> ListAllAsync(CancellationToken ct)
     {

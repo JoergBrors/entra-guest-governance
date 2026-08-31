@@ -246,16 +246,16 @@ export const api = {
   deleteWorkloadRole: (workloadId: string, roleId: string) =>
     request<void>(`/api/workloads/${workloadId}/roles/${roleId}`, { method: 'DELETE' }),
 
-  createWorkloadResource: (workloadId: string, resourceType: string, externalId: string | null) =>
+  createWorkloadResource: (workloadId: string, resourceType: string, externalId: string | null, displayName?: string | null) =>
     request<WorkloadResource>(`/api/workloads/${workloadId}/resources`, {
       method: 'POST',
-      body: JSON.stringify({ resourceType, externalId }),
+      body: JSON.stringify({ resourceType, externalId, displayName }),
     }),
 
-  updateWorkloadResource: (workloadId: string, resourceId: string, resourceType: string, externalId: string | null) =>
+  updateWorkloadResource: (workloadId: string, resourceId: string, resourceType: string, externalId: string | null, displayName?: string | null) =>
     request<WorkloadResource>(`/api/workloads/${workloadId}/resources/${resourceId}`, {
       method: 'PUT',
-      body: JSON.stringify({ resourceType, externalId }),
+      body: JSON.stringify({ resourceType, externalId, displayName }),
     }),
 
   deleteWorkloadResource: (workloadId: string, resourceId: string) =>
@@ -268,10 +268,10 @@ export const api = {
       body: JSON.stringify({ decision }),
     }),
 
-  attachWorkloadResource: (workloadId: string, resourceType: string, externalId: string) =>
+  attachWorkloadResource: (workloadId: string, resourceType: string, externalId: string, displayName?: string | null) =>
     request<WorkloadResource>(`/api/workloads/${workloadId}/resources/attach`, {
       method: 'POST',
-      body: JSON.stringify({ resourceType, externalId }),
+      body: JSON.stringify({ resourceType, externalId, displayName }),
     }),
 
   listAuditEvents: () => request<AuditEvent[]>('/api/audit-events'),

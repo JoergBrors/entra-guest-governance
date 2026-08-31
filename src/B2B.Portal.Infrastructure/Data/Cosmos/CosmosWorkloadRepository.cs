@@ -96,16 +96,19 @@ internal sealed class WorkloadResourceDocument
     [JsonPropertyName("workloadId")] public required Guid WorkloadId { get; init; }
     [JsonPropertyName("resourceType")] public required string ResourceType { get; init; }
     [JsonPropertyName("externalId")] public string? ExternalId { get; init; }
+    [JsonPropertyName("displayName")] public string? DisplayName { get; init; }
     [JsonPropertyName("managed")] public required bool Managed { get; init; }
 
     public static WorkloadResourceDocument FromEntity(WorkloadResource r) => new()
     {
-        Id = r.Id, WorkloadId = r.WorkloadId, ResourceType = r.ResourceType, ExternalId = r.ExternalId, Managed = r.Managed,
+        Id = r.Id, WorkloadId = r.WorkloadId, ResourceType = r.ResourceType, ExternalId = r.ExternalId,
+        DisplayName = r.DisplayName, Managed = r.Managed,
     };
 
     public WorkloadResource ToEntity() => new()
     {
-        Id = Id, WorkloadId = WorkloadId, ResourceType = ResourceType, ExternalId = ExternalId, Managed = Managed,
+        Id = Id, WorkloadId = WorkloadId, ResourceType = ResourceType, ExternalId = ExternalId,
+        DisplayName = DisplayName, Managed = Managed,
     };
 }
 

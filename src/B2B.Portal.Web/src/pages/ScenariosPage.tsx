@@ -106,7 +106,7 @@ export function ScenariosPage() {
 
   const resourceLabel = (resourceId: string) => {
     const resource = resources.find((r) => r.id === resourceId);
-    return resource ? `${resource.resourceType}:${resource.externalId ?? resource.id}` : resourceId;
+    return resource ? `${resource.resourceType}:${resource.displayName ?? resource.externalId ?? resource.id}` : resourceId;
   };
 
   const addGuiRule = (resourceId: string) => {
@@ -136,7 +136,7 @@ export function ScenariosPage() {
         const resource = resources.find((r) => r.id === rule.resourceId);
         if (!resource) throw new Error(`Ressource ${rule.resourceId} ist nicht mehr im Workload vorhanden.`);
         return {
-          resourceName: resource.externalId ?? resource.id,
+          resourceName: resource.displayName ?? resource.externalId ?? resource.id,
           resourceType: resource.resourceType,
           fields: parseFields(rule.fieldsText),
           condition: parseCondition(rule.conditionText),
@@ -155,7 +155,7 @@ export function ScenariosPage() {
     const rules = template.rules.map((rule) => {
       const resource = resources.find((candidate) =>
         candidate.resourceType === rule.resourceType
-        && (candidate.externalId === rule.resourceName || candidate.id === rule.resourceName));
+        && (candidate.displayName === rule.resourceName || candidate.externalId === rule.resourceName || candidate.id === rule.resourceName));
       if (!resource) {
         throw new Error(`Template-Ressource ${rule.resourceType}:${rule.resourceName} ist nicht im Workload vorhanden.`);
       }
@@ -290,7 +290,7 @@ export function ScenariosPage() {
         {resources.length === 0 && <Text>Keine Gruppen am Workload hinterlegt.</Text>}
         {resources.map((resource) => (
           <Badge key={resource.id} appearance="outline" color="brand" style={{ marginRight: 6, marginTop: 6 }}>
-            {resource.resourceType}:{resource.externalId ?? resource.id}
+            {resource.resourceType}:{resource.displayName ?? resource.externalId ?? resource.id}
           </Badge>
         ))}
       </Card>
@@ -387,7 +387,7 @@ export function ScenariosPage() {
                     }}
                   >
                     <Text size={200}>{resource.resourceType}</Text>
-                    <Text weight="semibold" block>{resource.externalId ?? resource.id}</Text>
+                    <Text weight="semibold" block>{resource.displayName ?? resource.externalId ?? resource.id}</Text>
                   </div>
                 ))}
                 <div className={styles.inlineForm}>

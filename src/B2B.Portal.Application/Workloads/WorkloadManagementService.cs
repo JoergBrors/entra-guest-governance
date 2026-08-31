@@ -251,7 +251,7 @@ public sealed class WorkloadManagementService(
 
     public async Task<WorkloadResource> UpsertResourceAsync(
         TenantContext tenant, Guid workloadId, Guid? resourceId, string resourceType,
-        string? externalId, string actor, CancellationToken ct)
+        string? externalId, string actor, CancellationToken ct, string? displayName = null)
     {
         var workload = await workloadRepository.GetAsync(tenant, workloadId, ct)
             ?? throw new InvalidOperationException($"Workload {workloadId} nicht gefunden.");
@@ -259,13 +259,18 @@ public sealed class WorkloadManagementService(
         var resource = resourceId is null ? null : workload.Resources.FirstOrDefault(r => r.Id == resourceId);
         if (resource is null)
         {
-            resource = new WorkloadResource { WorkloadId = workload.Id, ResourceType = resourceType, ExternalId = externalId, Managed = true };
+            resource = new WorkloadResource
+            {
+                WorkloadId = workload.Id, ResourceType = resourceType, ExternalId = externalId,
+                DisplayName = displayName, Managed = true,
+            };
             workload.Resources.Add(resource);
         }
         else
         {
             resource.ResourceType = resourceType;
             resource.ExternalId = externalId;
+            resource.DisplayName = displayName ?? resource.DisplayName;
         }
 
         workload.UpdatedAt = DateTimeOffset.UtcNow;
@@ -278,19 +283,33 @@ public sealed class WorkloadManagementService(
         return resource;
     }
 
+    /// <summary>
+    /// Haengt eine Ressource an einen Workload — externalId MUSS die stabile Entra-Object-ID
+    /// sein (siehe WorkloadResource-Kommentar), displayName ist der rein informative,
+    /// snapshot-artige Anzeigename zum Zeitpunkt des Attachments. Dedupliziert bewusst nach
+    /// ResourceType+ExternalId (ObjectId), nicht nach DisplayName — eine im Verzeichnis
+    /// umbenannte Gruppe mit gleichbleibender ObjectId erzeugt so weiterhin keinen doppelten
+    /// Eintrag, nur der DisplayName-Snapshot wird beim erneuten Attach aufgefrischt.
+    /// </summary>
     public async Task<WorkloadResource> AttachResourceAsync(
-        TenantContext tenant, Guid workloadId, string resourceType, string externalId, string actor, CancellationToken ct)
+        TenantContext tenant, Guid workloadId, string resourceType, string externalId, string actor, CancellationToken ct,
+        string? displayName = null)
     {
         var workload = await workloadRepository.GetAsync(tenant, workloadId, ct)
             ?? throw new InvalidOperationException($"Workload {workloadId} nicht gefunden.");
 
-        if (workload.Resources.Any(r =>
+        var existing = workload.Resources.FirstOrDefault(r =>
             string.Equals(r.ResourceType, resourceType, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(r.ExternalId, externalId, StringComparison.OrdinalIgnoreCase)))
+            && string.Equals(r.ExternalId, externalId, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
         {
-            return workload.Resources.First(r =>
-                string.Equals(r.ResourceType, resourceType, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(r.ExternalId, externalId, StringComparison.OrdinalIgnoreCase));
+            if (displayName is not null && !string.Equals(existing.DisplayName, displayName, StringComparison.Ordinal))
+            {
+                existing.DisplayName = displayName;
+                workload.UpdatedAt = DateTimeOffset.UtcNow;
+                await workloadRepository.UpsertAsync(workload, ct);
+            }
+            return existing;
         }
 
         var resource = new WorkloadResource
@@ -298,6 +317,7 @@ public sealed class WorkloadManagementService(
             WorkloadId = workload.Id,
             ResourceType = resourceType,
             ExternalId = externalId,
+            DisplayName = displayName,
             Managed = false,
         };
         workload.Resources.Add(resource);

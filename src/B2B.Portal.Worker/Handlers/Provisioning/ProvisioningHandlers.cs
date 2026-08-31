@@ -55,11 +55,16 @@ public sealed class GrantWorkloadRoleHandler(
             return;
         }
 
+        var grantedResources = new List<string>();
         foreach (var resourceId in role.ResourceMappings)
         {
             var resource = workload.Resources.FirstOrDefault(r => r.Id == resourceId);
             if (resource?.ExternalId is null)
             {
+                logger.LogWarning(
+                    "GrantWorkloadRole: Assignment {AssignmentId} — Ressource {ResourceId} in Rolle {RoleName} " +
+                    "hat keine ExternalId, wird uebersprungen.",
+                    assignmentId, resourceId, role.Name);
                 continue;
             }
 
@@ -68,14 +73,24 @@ public sealed class GrantWorkloadRoleHandler(
                 entraObjectId: guest.EntraObjectId,
                 resourceExternalId: resource.ExternalId,
                 ct);
+
+            logger.LogInformation(
+                "GrantWorkloadRole: Zugriff gewaehrt — Guest={GuestId} ({EntraObjectId}) auf " +
+                "{ResourceType}:{DisplayName} (ObjectId {ExternalId}) via Rolle {RoleName}. AssignmentId={AssignmentId}",
+                guest.Id, guest.EntraObjectId, resource.ResourceType, resource.DisplayName ?? resource.ExternalId,
+                resource.ExternalId, role.Name, assignmentId);
+            grantedResources.Add($"{resource.ResourceType}:{resource.DisplayName ?? resource.ExternalId}");
         }
 
         assignment.Status = AssignmentStatus.Active;
         assignment.UpdatedAt = DateTimeOffset.UtcNow;
         await assignmentRepository.UpsertAsync(assignment, ct);
 
-        logger.LogInformation("Assignment {AssignmentId} granted. CorrelationId={CorrelationId}",
-            assignmentId, job.CorrelationId);
+        logger.LogInformation(
+            "GrantWorkloadRole ABGESCHLOSSEN: Assignment={AssignmentId} Guest={GuestId} Workload={WorkloadId} " +
+            "({WorkloadName}) Rolle={RoleName} Ressourcen=[{Resources}] CorrelationId={CorrelationId}",
+            assignmentId, guest.Id, workload.Id, workload.Name, role.Name,
+            string.Join(", ", grantedResources), job.CorrelationId);
     }
 }
 
@@ -118,11 +133,16 @@ public sealed class RevokeWorkloadRoleHandler(
 
         // Entfernt ausschließlich die Member-Referenz des Workload-Zugriffs — die
         // Gastidentität selbst wird hier nie berührt (Anhang A, Regel 3).
+        var revokedResources = new List<string>();
         foreach (var resourceId in role.ResourceMappings)
         {
             var resource = workload.Resources.FirstOrDefault(r => r.Id == resourceId);
             if (resource?.ExternalId is null)
             {
+                logger.LogWarning(
+                    "RevokeWorkloadRole: Assignment {AssignmentId} — Ressource {ResourceId} in Rolle {RoleName} " +
+                    "hat keine ExternalId, wird uebersprungen.",
+                    assignmentId, resourceId, role.Name);
                 continue;
             }
 
@@ -131,9 +151,19 @@ public sealed class RevokeWorkloadRoleHandler(
                 entraObjectId: guest.EntraObjectId,
                 resourceExternalId: resource.ExternalId,
                 ct);
+
+            logger.LogInformation(
+                "RevokeWorkloadRole: Zugriff entzogen — Guest={GuestId} ({EntraObjectId}) auf " +
+                "{ResourceType}:{DisplayName} (ObjectId {ExternalId}) via Rolle {RoleName}. AssignmentId={AssignmentId}",
+                guest.Id, guest.EntraObjectId, resource.ResourceType, resource.DisplayName ?? resource.ExternalId,
+                resource.ExternalId, role.Name, assignmentId);
+            revokedResources.Add($"{resource.ResourceType}:{resource.DisplayName ?? resource.ExternalId}");
         }
 
-        logger.LogInformation("Assignment {AssignmentId} revoked. CorrelationId={CorrelationId}",
-            assignmentId, job.CorrelationId);
+        logger.LogInformation(
+            "RevokeWorkloadRole ABGESCHLOSSEN: Assignment={AssignmentId} Guest={GuestId} Workload={WorkloadId} " +
+            "({WorkloadName}) Rolle={RoleName} Ressourcen=[{Resources}] CorrelationId={CorrelationId}",
+            assignmentId, guest.Id, workload.Id, workload.Name, role.Name,
+            string.Join(", ", revokedResources), job.CorrelationId);
     }
 }

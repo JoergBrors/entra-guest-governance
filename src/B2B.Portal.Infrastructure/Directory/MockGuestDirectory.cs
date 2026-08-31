@@ -1,5 +1,8 @@
 using B2B.Portal.Application.Ports;
 using B2B.Portal.Domain.Entities;
+using B2B.Portal.Domain.Enums;
+using B2B.Portal.Domain.ValueObjects;
+using Microsoft.Extensions.Logging;
 
 namespace B2B.Portal.Infrastructure.Directory;
 
@@ -66,13 +69,26 @@ public sealed class MockEntraDirectoryStore
     // nach jedem Prozess-Neustart, kein Login moeglich, siehe docs/development/local-mock.md).
     private readonly IMockEntraUserRepository? _repository;
 
-    public MockEntraDirectoryStore() : this(null)
+    // Ergaenzung 2026-08-31: analog zu _repository, aber fuer Gruppen/Mitgliedschaften/
+    // Anwendungen/App-Sign-ins — vorher lebten diese ausschliesslich im In-Memory-Singleton
+    // und gingen bei jedem Prozessneustart (API wie Worker) verloren, was z.B. dazu fuehrte,
+    // dass eine manuell angelegte oder ueber einen Workload provisionierte Mock-Gruppe nach
+    // einem Neustart spurlos verschwand, obwohl ein Workload sie weiterhin referenzierte.
+    private readonly IMockEntraDirectoryRepository? _directoryRepository;
+
+    public MockEntraDirectoryStore() : this(null, null)
     {
     }
 
     public MockEntraDirectoryStore(IMockEntraUserRepository? repository)
+        : this(repository, null)
+    {
+    }
+
+    public MockEntraDirectoryStore(IMockEntraUserRepository? repository, IMockEntraDirectoryRepository? directoryRepository)
     {
         _repository = repository;
+        _directoryRepository = directoryRepository;
         SeedUser(new("mock-obj-anna", "anna_contoso.example#EXT#@platform.example", "anna@contoso.example",
             "Anna Contoso", "Anna", "Contoso", "Contoso Consulting", "Logistics",
             "External Consultant", "sponsor.mueller@platform.example", "true", "Guest", ["User"]));
@@ -227,23 +243,118 @@ public sealed class MockEntraDirectoryStore
     /// </summary>
     public async Task HydrateFromRepositoryAsync(CancellationToken ct)
     {
-        if (_repository is null)
+        if (_repository is not null)
+        {
+            var persistedUsers = await _repository.ListAllAsync(ct);
+            lock (_gate)
+            {
+                foreach (var user in persistedUsers)
+                {
+                    SeedUser(new MockEntraUser(
+                        user.ObjectId, user.UserPrincipalName, user.Mail, user.DisplayName, user.GivenName,
+                        user.Surname, user.CompanyName, user.Department, user.JobTitle, user.Sponsor,
+                        user.AccountEnabled, user.UserType, user.PortalRoles, user.LastLoginAt, user.PlatformTenantId));
+                }
+            }
+        }
+
+        if (_directoryRepository is null)
         {
             return;
         }
 
-        var persisted = await _repository.ListAllAsync(ct);
+        var persistedGroups = await _directoryRepository.ListGroupsAsync(ct);
+        var persistedMemberships = await _directoryRepository.ListMembershipsAsync(ct);
+        var persistedApplications = await _directoryRepository.ListApplicationsAsync(ct);
+        var persistedSignIns = await _directoryRepository.ListApplicationSignInsAsync(ct);
         lock (_gate)
         {
-            foreach (var user in persisted)
+            foreach (var group in persistedGroups)
             {
-                SeedUser(new MockEntraUser(
-                    user.ObjectId, user.UserPrincipalName, user.Mail, user.DisplayName, user.GivenName,
-                    user.Surname, user.CompanyName, user.Department, user.JobTitle, user.Sponsor,
-                    user.AccountEnabled, user.UserType, user.PortalRoles, user.LastLoginAt, user.PlatformTenantId));
+                SeedGroup(new MockEntraGroup(
+                    group.ObjectId, group.DisplayName, group.MailNickname, group.Description,
+                    group.GroupTypes, group.MailEnabled, group.SecurityEnabled, group.ResourceProvisioningOptions));
+            }
+
+            foreach (var membership in persistedMemberships)
+            {
+                if (!_membersByGroupId.TryGetValue(membership.GroupId, out var members))
+                {
+                    members = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    _membersByGroupId[membership.GroupId] = members;
+                }
+                members.Add(membership.EntraObjectId);
+            }
+
+            foreach (var application in persistedApplications)
+            {
+                SeedApplication(new MockEntraApplication(
+                    application.ObjectId, application.AppId, application.DisplayName,
+                    [.. application.AppRoles.Select(r => new MockEntraApplicationRole(r.Id, r.Value, r.DisplayName, r.Description))]));
+            }
+
+            foreach (var signIn in persistedSignIns)
+            {
+                _applicationSignIns[$"{signIn.AppId}:{signIn.EntraObjectId}"] = new MockEntraApplicationSignIn(
+                    $"{signIn.AppId}:{signIn.EntraObjectId}", signIn.AppId, signIn.EntraObjectId, signIn.LastLoginAt);
             }
         }
     }
+
+    /// <summary>
+    /// Gleicht den Ist-Zustand des Mock-Entra-Verzeichnisses (dieser Store, hydriert aus dem
+    /// dedizierten Cosmos-Container "entraid", siehe HydrateFromRepositoryAsync) gegen den
+    /// Soll-Zustand der Workloads eines Tenants ab (Desired State, Container "domain") und
+    /// meldet Abweichungen nur — schreibt sie NICHT automatisch zurueck.
+    ///
+    /// Vor Erweiterung 2026-08-31 ("EntraId-Persistenz + Discovery-Reconciliation") war diese
+    /// Methode ein Reparatur-Mechanismus: sie legte fehlende Gruppen/Mitgliedschaften aus
+    /// WorkloadResource-Eintraegen im In-Memory-Store neu an (EnsureGroupByObjectId/AddMember),
+    /// weil Gruppen damals nur fire-and-forget nach Cosmos geschrieben wurden und bei einem
+    /// Prozessabsturz zwischen In-Memory-Update und Persistierung verloren gehen konnten. Mit
+    /// dem eigenen "entraid"-Container und HydrateFromRepositoryAsync als vollstaendiger,
+    /// garantierter Quelle beim Prozessstart ist dieser Reparaturbedarf strukturell nicht mehr
+    /// gegeben — eine WorkloadResource, die auf eine im Verzeichnis fehlende ObjectId zeigt,
+    /// ist jetzt ein echtes Datenproblem (z.B. die Gruppe wurde im Mock-Entra-Stamm geloescht,
+    /// waehrend der Workload sie noch referenziert), kein Timing-Artefakt — daher nur Logging,
+    /// analog zu einem klassischen Discovery/Reconciliation-Lauf (Ist vs. Soll, keine
+    /// automatische Selbstheilung).
+    /// </summary>
+    public async Task<int> ReconcileWorkloadResourcesAsync(
+        TenantContext tenant,
+        IWorkloadRepository workloadRepo,
+        ILogger? logger,
+        CancellationToken ct)
+    {
+        var workloads = await workloadRepo.ListAsync(tenant, ct);
+        var missingCount = 0;
+        foreach (var workload in workloads)
+        {
+            foreach (var resource in workload.Resources.Where(r => IsMockEntraGroupResource(r) && !string.IsNullOrWhiteSpace(r.ExternalId)))
+            {
+                bool known;
+                lock (_gate)
+                {
+                    known = _groups.ContainsKey(resource.ExternalId!);
+                }
+                if (!known)
+                {
+                    missingCount++;
+                    logger?.LogWarning(
+                        "Discovery-Reconciliation: Workload {WorkloadId} ({WorkloadName}) referenziert Ressource " +
+                        "{ResourceType}:{DisplayName} (ObjectId {ExternalId}), die im Mock-Entra-Verzeichnis " +
+                        "(Container 'entraid') nicht mehr existiert.",
+                        workload.Id, workload.Name, resource.ResourceType, resource.DisplayName, resource.ExternalId);
+                }
+            }
+        }
+        return missingCount;
+    }
+
+    public static bool IsMockEntraGroupResource(WorkloadResource resource) =>
+        resource.ResourceType.Equals("SecurityGroup", StringComparison.OrdinalIgnoreCase)
+        || resource.ResourceType.Equals("M365Group", StringComparison.OrdinalIgnoreCase)
+        || resource.ResourceType.Equals("Team", StringComparison.OrdinalIgnoreCase);
 
     private void PersistUser(MockEntraUser user)
     {
@@ -263,13 +374,56 @@ public sealed class MockEntraDirectoryStore
         // machen und alle Call-Sites in Program.cs aendern. Verlorene Schreibversuche bei
         // einem Absturz zwischen Login und Persistierung sind fuer LOCAL_MOCK-Devdaten
         // akzeptabel; Fehler werden geloggt statt verschluckt.
-        _ = _repository.UpsertAsync(record, CancellationToken.None)
+        RunFireAndForget(
+            () => _repository.UpsertAsync(record, CancellationToken.None),
+            $"Persistieren von {user.Mail}");
+    }
+
+    private void PersistGroup(MockEntraGroup? group)
+    {
+        if (_directoryRepository is null || group is null)
+        {
+            return;
+        }
+
+        var record = new MockEntraGroupRecord(
+            group.ObjectId, group.DisplayName, group.MailNickname, group.Description,
+            group.GroupTypes, group.MailEnabled, group.SecurityEnabled, group.ResourceProvisioningOptions);
+        RunFireAndForget(
+            () => _directoryRepository.UpsertGroupAsync(record, CancellationToken.None),
+            $"Persistieren von Gruppe {group.DisplayName}");
+    }
+
+    private void PersistApplication(MockEntraApplication application)
+    {
+        if (_directoryRepository is null)
+        {
+            return;
+        }
+
+        var record = new MockEntraApplicationRecord(
+            application.ObjectId, application.AppId, application.DisplayName,
+            [.. application.AppRoles.Select(r => new MockEntraApplicationRoleRecord(r.Id, r.Value, r.DisplayName, r.Description))]);
+        RunFireAndForget(
+            () => _directoryRepository.UpsertApplicationAsync(record, CancellationToken.None),
+            $"Persistieren von Anwendung {application.DisplayName}");
+    }
+
+    // Fire-and-forget-Wrapper fuer alle Cosmos-Schreibzugriffe dieser Klasse: Upsert*/Add*/
+    // Remove*-Methoden sind bewusst synchron (werden auch aus synchronen Minimal-API-Handlern
+    // und aus Schleifen in HydrateFromWorkloadsAndGuestsAsync aufgerufen, siehe PersistUser-
+    // Kommentar) — ein await hier wuerde alle Call-Sites async machen. Verlorene
+    // Schreibversuche bei einem Absturz zwischen In-Memory-Update und Persistierung sind fuer
+    // LOCAL_MOCK-Devdaten akzeptabel; Fehler werden geloggt statt verschluckt.
+    private static void RunFireAndForget(Func<Task> action, string description)
+    {
+        _ = action()
             .ContinueWith(t =>
             {
                 if (t.Exception is not null)
                 {
                     Console.WriteLine(
-                        $"[MockEntraDirectoryStore] WARNUNG: Persistieren von {user.Mail} nach Cosmos fehlgeschlagen: " +
+                        $"[MockEntraDirectoryStore] WARNUNG: {description} nach Cosmos fehlgeschlagen: " +
                         $"{t.Exception.GetBaseException().Message}");
                 }
             }, TaskScheduler.Default);
@@ -293,12 +447,13 @@ public sealed class MockEntraDirectoryStore
 
     public MockEntraGroup UpsertGroup(MockEntraGroup group)
     {
+        MockEntraGroup normalized;
         lock (_gate)
         {
             var objectId = string.IsNullOrWhiteSpace(group.ObjectId)
                 ? $"mock-grp-{Guid.NewGuid():N}"[..24]
                 : group.ObjectId;
-            var normalized = group with
+            normalized = group with
             {
                 ObjectId = objectId,
                 MailNickname = string.IsNullOrWhiteSpace(group.MailNickname)
@@ -308,27 +463,42 @@ public sealed class MockEntraDirectoryStore
                 ResourceProvisioningOptions = group.ResourceProvisioningOptions ?? [],
             };
             SeedGroup(normalized);
-            return normalized;
         }
+        PersistGroup(normalized);
+        return normalized;
     }
 
     public bool DeleteGroup(string objectId)
     {
+        bool removed;
         lock (_gate)
         {
             _membersByGroupId.Remove(objectId);
-            return _groups.Remove(objectId);
+            removed = _groups.Remove(objectId);
         }
+        if (removed)
+        {
+            RunFireAndForget(
+                async () =>
+                {
+                    if (_directoryRepository is null) return;
+                    await _directoryRepository.DeleteGroupAsync(objectId, CancellationToken.None);
+                    await _directoryRepository.DeleteMembershipsByGroupAsync(objectId, CancellationToken.None);
+                },
+                $"Loeschen von Gruppe {objectId}");
+        }
+        return removed;
     }
 
     public MockEntraApplication UpsertApplication(MockEntraApplication application)
     {
+        MockEntraApplication normalized;
         lock (_gate)
         {
             var objectId = string.IsNullOrWhiteSpace(application.ObjectId)
                 ? $"mock-app-{Guid.NewGuid():N}"[..24]
                 : application.ObjectId;
-            var normalized = application with
+            normalized = application with
             {
                 ObjectId = objectId,
                 AppId = string.IsNullOrWhiteSpace(application.AppId)
@@ -337,13 +507,22 @@ public sealed class MockEntraDirectoryStore
                 AppRoles = application.AppRoles ?? [],
             };
             SeedApplication(normalized);
-            return normalized;
         }
+        PersistApplication(normalized);
+        return normalized;
     }
 
     public bool DeleteApplication(string objectId)
     {
-        lock (_gate) return _applications.Remove(objectId);
+        bool removed;
+        lock (_gate) removed = _applications.Remove(objectId);
+        if (removed)
+        {
+            RunFireAndForget(
+                () => _directoryRepository?.DeleteApplicationAsync(objectId, CancellationToken.None) ?? Task.CompletedTask,
+                $"Loeschen von Anwendung {objectId}");
+        }
+        return removed;
     }
 
     public IReadOnlyList<MockEntraApplicationSignIn> ListApplicationSignIns(string? appId = null)
@@ -361,13 +540,19 @@ public sealed class MockEntraDirectoryStore
 
     public MockEntraApplicationSignIn UpsertApplicationSignIn(string appId, string entraObjectId, DateTimeOffset lastLoginAt)
     {
+        MockEntraApplicationSignIn signIn;
         lock (_gate)
         {
             var id = $"{appId}:{entraObjectId}";
-            var signIn = new MockEntraApplicationSignIn(id, appId, entraObjectId, lastLoginAt);
+            signIn = new MockEntraApplicationSignIn(id, appId, entraObjectId, lastLoginAt);
             _applicationSignIns[id] = signIn;
-            return signIn;
         }
+        RunFireAndForget(
+            () => _directoryRepository?.UpsertApplicationSignInAsync(
+                new MockEntraApplicationSignInRecord(signIn.AppId, signIn.EntraObjectId, signIn.LastLoginAt),
+                CancellationToken.None) ?? Task.CompletedTask,
+            $"Persistieren von App-Sign-in {signIn.Id}");
+        return signIn;
     }
 
     public void UpsertGuestAccount(GuestAccount guest)
@@ -424,23 +609,60 @@ public sealed class MockEntraDirectoryStore
 
     public string EnsureGroup(string resourceType, string namePattern, IReadOnlyDictionary<string, string> metadata)
     {
+        MockEntraGroup? created = null;
+        string objectId;
         lock (_gate)
         {
             var existing = _groups.Values.FirstOrDefault(g => string.Equals(g.DisplayName, namePattern, StringComparison.OrdinalIgnoreCase));
-            if (existing is not null) return existing.ObjectId;
+            if (existing is not null)
+            {
+                return existing.ObjectId;
+            }
 
-            var objectId = $"mock-grp-{Guid.NewGuid():N}"[..24];
-            SeedGroup(BuildGroup(
+            objectId = $"mock-grp-{Guid.NewGuid():N}"[..24];
+            created = BuildGroup(
                 objectId,
                 namePattern,
                 resourceType,
-                metadata.TryGetValue("ScenarioId", out var scenarioId) ? $"Scenario {scenarioId}" : "Created by LOCAL_MOCK worker."));
-            return objectId;
+                metadata.TryGetValue("ScenarioId", out var scenarioId) ? $"Scenario {scenarioId}" : "Created by LOCAL_MOCK worker.");
+            SeedGroup(created);
         }
+        PersistGroup(created);
+        return objectId;
+    }
+
+    /// <summary>
+    /// Stellt sicher, dass eine Gruppe mit der gegebenen Entra-Object-ID existiert — anders
+    /// als EnsureGroup (das per DisplayName sucht/erstellt und daher nur fuer
+    /// namensbasierte Aufrufer wie MockResourceConnector.CreateResourceAsync passt) wird hier
+    /// GEZIELT nach der ObjectId gesucht (Erweiterung 2026-08-31 "Object-ID-Referenzierung"):
+    /// WorkloadResource.ExternalId ist immer eine ObjectId, daher wuerde EnsureGroup bei einem
+    /// Cache-Miss faelschlich eine zusaetzliche Gruppe mit DisplayName = ObjectId anlegen,
+    /// statt die eigentlich schon existierende Gruppe wiederzufinden. Nur falls wirklich keine
+    /// Gruppe mit dieser ObjectId bekannt ist (z.B. externes Cosmos-Backup unvollstaendig),
+    /// wird sie mit der gegebenen ObjectId neu angelegt, mit displayNameFallback als Anzeigename.
+    /// </summary>
+    public void EnsureGroupByObjectId(string objectId, string resourceType, string? displayNameFallback)
+    {
+        MockEntraGroup? created = null;
+        lock (_gate)
+        {
+            if (_groups.ContainsKey(objectId))
+            {
+                return;
+            }
+
+            created = BuildGroup(objectId, displayNameFallback ?? objectId, resourceType, "Reconstructed from WorkloadResource.");
+            SeedGroup(created);
+        }
+        PersistGroup(created);
     }
 
     public void AddMember(string groupIdOrDisplayName, string entraObjectId)
     {
+        string groupId;
+        bool added;
+        MockEntraGroup? createdGroup = null;
         lock (_gate)
         {
             var group = ResolveGroup(groupIdOrDisplayName) ?? BuildGroup(
@@ -451,31 +673,58 @@ public sealed class MockEntraDirectoryStore
             if (!_groups.ContainsKey(group.ObjectId))
             {
                 SeedGroup(group);
+                createdGroup = group;
             }
-            if (!_users.ContainsKey(entraObjectId)) return;
+            groupId = group.ObjectId;
+            if (!_users.ContainsKey(entraObjectId))
+            {
+                return;
+            }
             if (!_membersByGroupId.TryGetValue(group.ObjectId, out var members))
             {
                 members = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 _membersByGroupId[group.ObjectId] = members;
             }
-            members.Add(entraObjectId);
+            added = members.Add(entraObjectId);
+        }
+        if (createdGroup is not null)
+        {
+            PersistGroup(createdGroup);
+        }
+        if (added)
+        {
+            RunFireAndForget(
+                () => _directoryRepository?.UpsertMembershipAsync(
+                    new MockEntraMembershipRecord(groupId, entraObjectId), CancellationToken.None) ?? Task.CompletedTask,
+                $"Persistieren von Mitgliedschaft {groupId}/{entraObjectId}");
         }
     }
 
     public void RemoveMember(string groupIdOrDisplayName, string entraObjectId)
     {
+        string? groupId = null;
+        bool removed = false;
         lock (_gate)
         {
             var group = ResolveGroup(groupIdOrDisplayName);
             if (group is not null && _membersByGroupId.TryGetValue(group.ObjectId, out var members))
             {
-                members.Remove(entraObjectId);
+                groupId = group.ObjectId;
+                removed = members.Remove(entraObjectId);
             }
+        }
+        if (removed && groupId is not null)
+        {
+            RunFireAndForget(
+                () => _directoryRepository?.DeleteMembershipAsync(groupId, entraObjectId, CancellationToken.None) ?? Task.CompletedTask,
+                $"Loeschen von Mitgliedschaft {groupId}/{entraObjectId}");
         }
     }
 
     public int RemoveAllMembers(string groupIdOrDisplayName)
     {
+        string? groupId = null;
+        int count;
         lock (_gate)
         {
             var group = ResolveGroup(groupIdOrDisplayName);
@@ -483,10 +732,17 @@ public sealed class MockEntraDirectoryStore
             {
                 return 0;
             }
-            var count = members.Count;
+            groupId = group.ObjectId;
+            count = members.Count;
             members.Clear();
-            return count;
         }
+        if (count > 0 && groupId is not null)
+        {
+            RunFireAndForget(
+                () => _directoryRepository?.DeleteMembershipsByGroupAsync(groupId, CancellationToken.None) ?? Task.CompletedTask,
+                $"Loeschen aller Mitgliedschaften von Gruppe {groupId}");
+        }
+        return count;
     }
 
     public bool HasMembership(string entraObjectId) =>

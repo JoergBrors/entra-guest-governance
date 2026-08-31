@@ -86,17 +86,23 @@ public sealed record JobEnvelope(
 /// <summary>
 /// Bekannte JobType-Werte (Blueprint 10.2 / MVP-Dokument 12). Als Konstanten statt
 /// Magic Strings, damit Dispatcher und Handler konsistent registrieren/matchen.
+///
+/// Jeder hier definierte JobType MUSS einen registrierten IJobHandler haben (siehe
+/// B2B.Portal.Worker/Program.cs, AddSingleton&lt;IJobHandler, ...&gt;) — ein JobType ohne
+/// Handler wuerde beim Dispatch mit "Kein Handler fuer JobType {JobType} registriert"
+/// scheitern und der Job landet im DeadLetter, ohne dass irgendetwas ausgefuehrt wird (siehe
+/// JobDispatcher.cs). Vor Erweiterung 2026-08-31 ("Job/Worker-Audit") gab es hier drei
+/// nie enqueuete, nie mit einem Handler verdrahtete Karteileichen (CreateGroup, CreateTeam,
+/// SynchronizeGuest) — entfernt, weil ein versehentliches Enqueue dieser Werte (z.B. durch
+/// Copy-Paste eines aehnlichen JobTypes) still im DeadLetter verschwunden waere.
 /// </summary>
 public static class JobTypes
 {
     public const string InviteGuest = nameof(InviteGuest);
     public const string ResendInvitation = nameof(ResendInvitation);
     public const string InvitationReminder = nameof(InvitationReminder);
-    public const string CreateGroup = nameof(CreateGroup);
-    public const string CreateTeam = nameof(CreateTeam);
     public const string GrantWorkloadRole = nameof(GrantWorkloadRole);
     public const string RevokeWorkloadRole = nameof(RevokeWorkloadRole);
-    public const string SynchronizeGuest = nameof(SynchronizeGuest);
     public const string RunDiscovery = nameof(RunDiscovery);
     public const string RunReconciliation = nameof(RunReconciliation);
     public const string StartReview = nameof(StartReview);

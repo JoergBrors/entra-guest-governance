@@ -69,13 +69,16 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<IWorkloadScenarioRepository, CosmosWorkloadScenarioRepository>();
         services.AddSingleton<IExternalOrganizationRepository, CosmosExternalOrganizationRepository>();
         services.AddSingleton<IMockEntraUserRepository, CosmosMockEntraUserRepository>();
+        services.AddSingleton<IMockEntraDirectoryRepository, CosmosMockEntraDirectoryRepository>();
         services.AddSingleton<IReminderPolicyRepository, CosmosReminderPolicyRepository>();
         services.AddSingleton<IMailSinkRepository, CosmosMailSinkRepository>();
 
         // Nimmt IMockEntraUserRepository als optionale Abhaengigkeit (siehe MockGuestDirectory.cs)
         // fuer Persistenz von PortalRoles und Startup-Hydration (Program.cs ruft
         // HydrateFromRepositoryAsync beim Start auf, siehe dortiger LOCAL_MOCK-Block).
-        services.AddSingleton(sp => new MockEntraDirectoryStore(sp.GetRequiredService<IMockEntraUserRepository>()));
+        services.AddSingleton(sp => new MockEntraDirectoryStore(
+            sp.GetRequiredService<IMockEntraUserRepository>(),
+            sp.GetRequiredService<IMockEntraDirectoryRepository>()));
 
         if (directoryProvider.Equals("graph", StringComparison.OrdinalIgnoreCase) && mode != "LOCAL_MOCK")
         {

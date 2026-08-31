@@ -50,11 +50,22 @@ public sealed class JobDispatcher(
             return true;
         }
 
+        var triggeredBy = await GetTriggeredByAsync(job, ct);
+        var handlerName = handler.GetType().Name;
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
+            // Ausfuehrlich VOR der Ausfuehrung geloggt (Erweiterung 2026-08-31 "Job/Worker-
+            // Audit": vorher fehlten Handler-Name, TriggeredBy und Payload komplett — bei
+            // einem haengenden/fehlerhaften Job liess sich aus den Logs allein nicht
+            // rekonstruieren, WER den Job warum ausgeloest hat und mit welchen Parametern).
             logger.LogInformation(
-                "Verarbeite Job {JobId} Type={JobType} Tenant={Tenant} CorrelationId={CorrelationId}",
-                job.JobId, job.JobType, job.PlatformTenantId, job.CorrelationId);
+                "Job GESTARTET: {JobId} Type={JobType} Handler={Handler} Tenant={Tenant} " +
+                "EntityType={EntityType} EntityId={EntityId} TriggeredBy={TriggeredBy} " +
+                "CorrelationId={CorrelationId} Payload={Payload}",
+                job.JobId, job.JobType, handlerName, job.PlatformTenantId,
+                job.EntityType, job.EntityId, triggeredBy ?? "(unbekannt)",
+                job.CorrelationId, job.Payload.GetRawText());
 
             await UpdateOperationStatusAsync(job, JobStatus.Running, null, ct);
             await handler.HandleAsync(job, ct);
@@ -63,6 +74,13 @@ public sealed class JobDispatcher(
                 await UpdateOperationStatusAsync(job, JobStatus.Success, null, ct);
             }
             await jobQueue.CompleteAsync(job.JobId, ct);
+
+            stopwatch.Stop();
+            logger.LogInformation(
+                "Job ERFOLGREICH: {JobId} Type={JobType} Handler={Handler} Tenant={Tenant} " +
+                "Dauer={ElapsedMs}ms CorrelationId={CorrelationId}",
+                job.JobId, job.JobType, handlerName, job.PlatformTenantId,
+                stopwatch.ElapsedMilliseconds, job.CorrelationId);
         }
         catch (Exception ex)
         {
@@ -71,21 +89,47 @@ public sealed class JobDispatcher(
             // Worker-Neustart bzw. mehrere Worker-Instanzen uebersteht (siehe
             // IJobQueue.RetryAsync-Dokumentation).
             var attempt = await jobQueue.RetryAsync(job.JobId, ex.Message, ct);
+            stopwatch.Stop();
 
             if (attempt >= MaxRetries)
             {
-                logger.LogError(ex, "Job {JobId} nach {Attempts} Versuchen -> DeadLetter", job.JobId, attempt);
+                logger.LogError(
+                    ex, "Job DEADLETTER: {JobId} Type={JobType} Handler={Handler} Tenant={Tenant} " +
+                    "nach {Attempts} Versuchen, Dauer letzter Versuch={ElapsedMs}ms CorrelationId={CorrelationId}",
+                    job.JobId, job.JobType, handlerName, job.PlatformTenantId, attempt, stopwatch.ElapsedMilliseconds, job.CorrelationId);
                 await UpdateOperationStatusAsync(job, JobStatus.DeadLetter, ex.Message, ct, attempt);
                 await jobQueue.DeadLetterAsync(job.JobId, ex.Message, ct);
             }
             else
             {
-                logger.LogWarning(ex, "Job {JobId} fehlgeschlagen (Versuch {Attempt}) -> Retry", job.JobId, attempt);
+                logger.LogWarning(
+                    ex, "Job FEHLGESCHLAGEN (Retry folgt): {JobId} Type={JobType} Handler={Handler} Tenant={Tenant} " +
+                    "Versuch={Attempt} Dauer={ElapsedMs}ms CorrelationId={CorrelationId}",
+                    job.JobId, job.JobType, handlerName, job.PlatformTenantId, attempt, stopwatch.ElapsedMilliseconds, job.CorrelationId);
                 await UpdateOperationStatusAsync(job, JobStatus.Retry, ex.Message, ct, attempt);
             }
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Liest TriggeredBy aus der persistierten DirectoryOperation (siehe ProvisioningService.
+    /// EnqueueJobAsync, das TriggeredBy beim Anlegen setzt) — nicht Teil von JobEnvelope
+    /// selbst, da JobEnvelope der schlanke Transport-Typ ist, den auch In-Memory/Test-Queues
+    /// ohne Job-Repository verwenden koennen (siehe jobRepository als optionaler Parameter).
+    /// null, wenn kein Repository verdrahtet ist oder kein Log-Eintrag existiert.
+    /// </summary>
+    private async Task<string?> GetTriggeredByAsync(JobEnvelope job, CancellationToken ct)
+    {
+        if (jobRepository is null)
+        {
+            return null;
+        }
+
+        var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
+        var operation = await jobRepository.GetAsync(tenant, job.JobId, ct);
+        return operation?.TriggeredBy;
     }
 
     private async Task UpdateOperationStatusAsync(

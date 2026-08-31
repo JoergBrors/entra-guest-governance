@@ -3,11 +3,17 @@
 // bei erneutem Deployment ggf. enableFreeTier=false setzen.
 //
 // Container-Struktur gemäß Datenhaltungskonzept (Desired State / Actual State / Jobs /
-// Audit getrennt, siehe docs/architecture — vier logisch getrennte Container statt eines
-// gemeinsamen "domain-data"-Containers):
+// Audit / Verzeichnis getrennt, siehe docs/architecture — fünf logisch getrennte Container
+// statt eines gemeinsamen "domain-data"-Containers):
 //   domain     — Desired State: Tenant, ExternalOrganization, GuestAccount, Workload,
 //                WorkloadScenario, GuestWorkloadAssignment, ReviewDefinition/Instance
 //   discovery  — Actual State: ResourceAccess
+//   entraid    — Mock-Entra-Verzeichnis-Bestand (Erweiterung 2026-08-31 "EntraId-Persistenz"):
+//                MockEntraUser/-Group/-Membership/-Application/-ApplicationSignIn. Eigener
+//                Container statt Unterbringung in "discovery", weil es sich fachlich nicht um
+//                Actual-State-Zugriffsdaten handelt, sondern um den (gemockten) Verzeichnis-
+//                Bestand selbst, den ein Discovery-Lauf gegen den Desired State (domain)
+//                abgleicht.
 //   jobs       — DirectoryOperation + JobEnvelope (Job-Queue-Transportdokumente)
 //   audit      — AuditEvent (unveränderliche Nachweise)
 
@@ -76,6 +82,24 @@ resource discoveryContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/
   properties: {
     resource: {
       id: 'discovery'
+      partitionKey: {
+        paths: ['/platformTenantId']
+        kind: 'Hash'
+      }
+    }
+  }
+}
+
+// Mock-Entra-Verzeichnis (MockEntraUser/-Group/-Membership/-Application/-ApplicationSignIn),
+// partitioniert wie alle uebrigen Container nach /platformTenantId — Users tragen dort ihre
+// echte PlatformTenantId, tenant-unabhaengige Objekte (Gruppen, Anwendungen) den festen
+// Platzhalterwert "mock-entra" (siehe CosmosMockEntraDirectoryRepository).
+resource entraIdContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-08-15' = {
+  parent: database
+  name: 'entraid'
+  properties: {
+    resource: {
+      id: 'entraid'
       partitionKey: {
         paths: ['/platformTenantId']
         kind: 'Hash'

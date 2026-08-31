@@ -58,9 +58,12 @@ public sealed class ScenarioImportExportService(
 
         foreach (var ruleDto in template.Rules)
         {
+            // ResourceName im Template ist ein Anzeigename (z.B. "SG-MERIDIAN-READ"), keine
+            // Entra-Object-ID — Aufloesung daher ueber DisplayName, nicht ExternalId (siehe
+            // WorkloadResource-Kommentar: ExternalId ist immer die stabile ObjectId).
             var resource = workload.Resources.FirstOrDefault(r =>
                 string.Equals(r.ResourceType, ruleDto.ResourceType, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(r.ExternalId, ruleDto.ResourceName, StringComparison.OrdinalIgnoreCase));
+                && string.Equals(r.DisplayName, ruleDto.ResourceName, StringComparison.OrdinalIgnoreCase));
 
             if (resource is null)
             {
@@ -124,7 +127,7 @@ public sealed class ScenarioImportExportService(
             }
 
             ruleDtos.Add(new ScenarioTemplateRuleDto(
-                resource.ExternalId ?? resource.Id.ToString(),
+                resource.DisplayName ?? resource.ExternalId ?? resource.Id.ToString(),
                 resource.ResourceType,
                 rule.Fields,
                 rule.Condition));

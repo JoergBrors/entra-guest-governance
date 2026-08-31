@@ -45,7 +45,7 @@ public sealed class SyncWorkloadPatternResourcesHandler(
                     ? "M365Group"
                     : "SecurityGroup";
 
-            await workloadService.AttachResourceAsync(tenant, workloadId, resourceType, group.DisplayName, actor, ct);
+            await workloadService.AttachResourceAsync(tenant, workloadId, resourceType, group.ObjectId, actor, ct, group.DisplayName);
             attached++;
         }
 

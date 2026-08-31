@@ -206,6 +206,74 @@ public interface IMockEntraUserRepository
     Task UpsertAsync(MockEntraUserRecord user, CancellationToken ct);
 }
 
+/// <summary>DTO fuer eine Mock-Entra-Gruppe (siehe MockEntraUserRecord-Kommentar: Application
+/// darf Infrastructure nicht referenzieren, daher dieses eigene Record statt MockEntraGroup).
+/// </summary>
+public sealed record MockEntraGroupRecord(
+    string ObjectId,
+    string DisplayName,
+    string MailNickname,
+    string Description,
+    IReadOnlyList<string> GroupTypes,
+    bool MailEnabled,
+    bool SecurityEnabled,
+    IReadOnlyList<string> ResourceProvisioningOptions);
+
+/// <summary>DTO fuer eine Mock-Entra-Gruppenmitgliedschaft.</summary>
+public sealed record MockEntraMembershipRecord(string GroupId, string EntraObjectId);
+
+/// <summary>DTO fuer eine Mock-Entra-Anwendung (App-Registrierung).</summary>
+public sealed record MockEntraApplicationRecord(
+    string ObjectId,
+    string AppId,
+    string DisplayName,
+    IReadOnlyList<MockEntraApplicationRoleRecord> AppRoles);
+
+public sealed record MockEntraApplicationRoleRecord(string Id, string Value, string DisplayName, string Description);
+
+/// <summary>DTO fuer einen Mock-Entra-Anwendungs-Sign-in.</summary>
+public sealed record MockEntraApplicationSignInRecord(string AppId, string EntraObjectId, DateTimeOffset LastLoginAt);
+
+/// <summary>
+/// Persistenz fuer den restlichen Mock-Entra-Bestand (Gruppen, Mitgliedschaften, Anwendungen,
+/// Anwendungs-Sign-ins) — Ergaenzung zu IMockEntraUserRepository (Erweiterung 2026-08-31:
+/// vorher lebten Gruppen/Memberships/Applications/AppSignIns ausschliesslich im In-Memory
+/// MockEntraDirectoryStore-Singleton und gingen bei jedem Prozessneustart (API wie Worker)
+/// verloren — Gruppen liessen sich zwar teilweise aus persistierten WorkloadResource-Eintraegen
+/// rekonstruieren (siehe MockEntraDirectoryStore.HydrateFromWorkloadsAndGuestsAsync), aber
+/// eigenstaendig angelegte oder manuell administrierte Gruppen/Mitgliedschaften (z.B. ueber
+/// /api/dev/mock-entra/groups) nicht. Bewusst ohne TenantContext-Parameter — Gruppen/
+/// Anwendungen sind im Mock-Entra-Stamm (anders als Users) nicht tenant-gebunden (siehe
+/// MockEntraGroup/MockEntraApplication in MockGuestDirectory.cs), Cosmos-seitig laufen die
+/// Queries daher Cross-Partition wie IMockEntraUserRepository.ListAllAsync.
+/// </summary>
+public interface IMockEntraDirectoryRepository
+{
+    Task<IReadOnlyList<MockEntraGroupRecord>> ListGroupsAsync(CancellationToken ct);
+
+    Task UpsertGroupAsync(MockEntraGroupRecord group, CancellationToken ct);
+
+    Task DeleteGroupAsync(string objectId, CancellationToken ct);
+
+    Task<IReadOnlyList<MockEntraMembershipRecord>> ListMembershipsAsync(CancellationToken ct);
+
+    Task UpsertMembershipAsync(MockEntraMembershipRecord membership, CancellationToken ct);
+
+    Task DeleteMembershipAsync(string groupId, string entraObjectId, CancellationToken ct);
+
+    Task DeleteMembershipsByGroupAsync(string groupId, CancellationToken ct);
+
+    Task<IReadOnlyList<MockEntraApplicationRecord>> ListApplicationsAsync(CancellationToken ct);
+
+    Task UpsertApplicationAsync(MockEntraApplicationRecord application, CancellationToken ct);
+
+    Task DeleteApplicationAsync(string objectId, CancellationToken ct);
+
+    Task<IReadOnlyList<MockEntraApplicationSignInRecord>> ListApplicationSignInsAsync(CancellationToken ct);
+
+    Task UpsertApplicationSignInAsync(MockEntraApplicationSignInRecord signIn, CancellationToken ct);
+}
+
 /// <summary>
 /// Persistenz fuer die Erinnerungs-Policy fuer offene Einladungen (Erweiterung 2026-08-30
 /// "Invitation Reminder Worker"). Genau eine Policy pro PlatformTenantId — GetAsync liefert

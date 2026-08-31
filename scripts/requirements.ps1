@@ -470,13 +470,15 @@ if ($InitCosmosEmulator) {
                 return Invoke-RestMethod @params
             }
 
-            # Vier logisch getrennte Container statt eines gemeinsamen "domain-data"-
-            # Containers: Desired State (domain) / Actual State (discovery) / Job-Queue
-            # (jobs) / Audit (audit) — spiegelt infra/modules/cosmos-free-tier.bicep exakt.
+            # Fuenf logisch getrennte Container statt eines gemeinsamen "domain-data"-
+            # Containers: Desired State (domain) / Actual State (discovery) / Mock-Entra-
+            # Verzeichnis (entraid) / Job-Queue (jobs) / Audit (audit) — spiegelt
+            # infra/modules/cosmos-free-tier.bicep exakt.
             $databaseId = "b2b-governance-dev"
             $containers = @(
                 @{ id = "domain"; partitionKey = @{ paths = @("/platformTenantId"); kind = "Hash" } }
                 @{ id = "discovery"; partitionKey = @{ paths = @("/platformTenantId"); kind = "Hash" } }
+                @{ id = "entraid"; partitionKey = @{ paths = @("/platformTenantId"); kind = "Hash" } }
                 @{ id = "jobs"; partitionKey = @{ paths = @("/platformTenantId"); kind = "Hash" }; defaultTtl = -1 }
                 @{ id = "audit"; partitionKey = @{ paths = @("/platformTenantId"); kind = "Hash" }; defaultTtl = -1 }
             )
@@ -507,7 +509,7 @@ if ($InitCosmosEmulator) {
                         else { throw }
                     }
                 }
-                Add-Result "Cosmos DB Struktur" "OK" "Datenbank '$databaseId' + Container domain/discovery/jobs/audit vorhanden (siehe infra/modules/cosmos-free-tier.bicep)"
+                Add-Result "Cosmos DB Struktur" "OK" "Datenbank '$databaseId' + Container domain/discovery/entraid/jobs/audit vorhanden (siehe infra/modules/cosmos-free-tier.bicep)"
             }
             catch {
                 Add-Result "Cosmos DB Struktur" "FEHLER" $_.Exception.Message

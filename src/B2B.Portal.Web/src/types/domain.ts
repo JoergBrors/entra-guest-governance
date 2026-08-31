@@ -48,7 +48,10 @@ export interface WorkloadResource {
   id: string;
   workloadId: string;
   resourceType: string;
+  /** Stabile Entra-Object-ID der Ressource, niemals der Anzeigename (siehe displayName). */
   externalId?: string | null;
+  /** Informativer Anzeigename-Snapshot, z.B. der Gruppenname aus dem Mock-Entra-Verzeichnis. */
+  displayName?: string | null;
   managed: boolean;
 }
 

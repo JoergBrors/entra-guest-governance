@@ -195,18 +195,24 @@ public class ScenarioDeploymentTests
         var importExportService = new ScenarioImportExportService(workloadRepo, scenarioRepo, auditService);
 
         var workload = new Workload { PlatformTenantId = tenant.PlatformTenantId, Name = "SAP-Rollout" };
+        // ScenarioImportExportService.ImportAsync loest Template-Ressourcen ueber DisplayName
+        // auf (Anzeigename), nicht ueber ExternalId (das ist die Entra-Object-ID) — siehe
+        // WorkloadResource-Kommentar. ExternalId wird hier trotzdem mitgegeben, um zu
+        // verifizieren, dass die Aufloesung tatsaechlich ueber DisplayName laeuft.
         workload.Resources.Add(new WorkloadResource
         {
             WorkloadId = workload.Id,
             ResourceType = "SecurityGroup",
-            ExternalId = "SG-FABRIKAM-DISPONENT",
+            ExternalId = "mock-grp-fabrikam-disponent",
+            DisplayName = "SG-FABRIKAM-DISPONENT",
             Managed = false,
         });
         workload.Resources.Add(new WorkloadResource
         {
             WorkloadId = workload.Id,
             ResourceType = "SecurityGroup",
-            ExternalId = "SG-FABRIKAM-READER",
+            ExternalId = "mock-grp-fabrikam-reader",
+            DisplayName = "SG-FABRIKAM-READER",
             Managed = false,
         });
         await workloadRepo.UpsertAsync(workload, CancellationToken.None);
@@ -269,8 +275,8 @@ public class ScenarioDeploymentTests
         var workload = new Workload { PlatformTenantId = tenant.PlatformTenantId, Name = "Delete-Test-Workload" };
         // Ressource, die zusaetzlich von einer WorkloadRole referenziert wird -> darf beim
         // Szenario-Loeschen NICHT entfernt werden.
-        var sharedResource = new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "SG-SHARED" };
-        var orphanResource = new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "SG-ORPHAN-ONLY" };
+        var sharedResource = new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "mock-grp-shared", DisplayName = "SG-SHARED" };
+        var orphanResource = new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "mock-grp-orphan-only", DisplayName = "SG-ORPHAN-ONLY" };
         var role = new WorkloadRole { WorkloadId = workload.Id, Name = "Reader" };
         role.ResourceMappings.Add(sharedResource.Id);
         workload.Resources.Add(sharedResource);
@@ -297,8 +303,8 @@ public class ScenarioDeploymentTests
         await importExportService.DeleteAsync(tenant, importResult.ScenarioId!.Value, "test", CancellationToken.None);
 
         var reloadedWorkload = await workloadRepo.GetAsync(tenant, workload.Id, CancellationToken.None);
-        Assert.Contains(reloadedWorkload!.Resources, r => r.ExternalId == "SG-SHARED");
-        Assert.DoesNotContain(reloadedWorkload.Resources, r => r.ExternalId == "SG-ORPHAN-ONLY");
+        Assert.Contains(reloadedWorkload!.Resources, r => r.DisplayName == "SG-SHARED");
+        Assert.DoesNotContain(reloadedWorkload.Resources, r => r.DisplayName == "SG-ORPHAN-ONLY");
         Assert.Null(await scenarioRepo.GetAsync(tenant, importResult.ScenarioId!.Value, CancellationToken.None));
     }
 }

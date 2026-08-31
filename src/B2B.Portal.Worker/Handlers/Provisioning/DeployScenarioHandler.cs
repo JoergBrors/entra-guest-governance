@@ -51,6 +51,7 @@ public sealed class DeployScenarioHandler(
         var resourcesById = workload.Resources.ToDictionary(r => r.Id);
         var deployedCount = 0;
         var skippedCount = 0;
+        var workloadChanged = false;
 
         foreach (var rule in scenario.Rules)
         {
@@ -76,18 +77,42 @@ public sealed class DeployScenarioHandler(
             // und stellt sicher, dass die Ziel-Ressource (Gruppe/Team) existiert — ein
             // Szenario-Deployment grant-et keinem einzelnen Gast Zugriff (das bleibt
             // GrantWorkloadRoleHandler vorbehalten), sondern stellt die pro Regel
-            // beschriebene Ressource selbst bereit.
+            // beschriebene Ressource selbst bereit. namePattern nutzt bewusst noch den
+            // (evtl. veralteten) DisplayName-Snapshot bzw. die alte ExternalId nur als
+            // Fallback fuer die Namensbildung beim Connector — massgeblich fuer die
+            // Ressourcen-IDENTITAET ist ausschliesslich die unten zurueckgeschriebene ObjectId.
+            var namePatternSuffix = resource.DisplayName ?? resource.ExternalId ?? resource.Id.ToString();
             var metadata = new Dictionary<string, string>(rule.Fields)
             {
                 ["ScenarioId"] = scenario.Id.ToString(),
                 ["ResourceType"] = resource.ResourceType,
             };
-            await connector.CreateResourceAsync(
+            var namePattern = $"{workload.Name}-{scenario.Name}-{resource.ResourceType}-{namePatternSuffix}";
+            var objectId = await connector.CreateResourceAsync(
                 directoryTenantId: job.DirectoryTenantId ?? string.Empty,
-                namePattern: $"{workload.Name}-{scenario.Name}-{resource.ResourceType}-{resource.ExternalId}",
+                namePattern: namePattern,
                 metadata: metadata,
                 ct);
+
+            // Root-Cause-Fix (Erweiterung 2026-08-31): vorher wurde die von CreateResourceAsync
+            // zurueckgegebene ObjectId verworfen — resource.ExternalId blieb dauerhaft leer/
+            // veraltet, obwohl der Connector die Ressource bereits angelegt hatte. Jetzt wird
+            // die ObjectId als stabile Referenz persistiert, namePattern als DisplayName-
+            // Snapshot uebernommen (siehe WorkloadResource-Kommentar: ExternalId = ObjectId,
+            // DisplayName = informativer Snapshot).
+            if (!string.Equals(resource.ExternalId, objectId, StringComparison.OrdinalIgnoreCase))
+            {
+                resource.ExternalId = objectId;
+                resource.DisplayName = namePattern;
+                workloadChanged = true;
+            }
             deployedCount++;
+        }
+
+        if (workloadChanged)
+        {
+            workload.UpdatedAt = DateTimeOffset.UtcNow;
+            await workloadRepository.UpsertAsync(workload, ct);
         }
 
         logger.LogInformation(

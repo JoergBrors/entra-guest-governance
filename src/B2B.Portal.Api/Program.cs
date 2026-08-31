@@ -106,8 +106,25 @@ if (mode == "LOCAL_MOCK")
     try
     {
         await mockEntraStore.HydrateFromRepositoryAsync(CancellationToken.None);
+
+        // Discovery-Reconciliation statt Reparatur (Erweiterung 2026-08-31): der dedizierte
+        // Container "entraid" ist jetzt die vollstaendige, garantierte Quelle fuer den
+        // Mock-Entra-Bestand (siehe HydrateFromRepositoryAsync oben) — ReconcileWorkloadResourcesAsync
+        // prueft nur noch, ob alle von Workloads referenzierten Ressourcen dort auch bekannt
+        // sind, und meldet Abweichungen als Warnung statt sie automatisch nachzubauen.
+        var workloadRepo = startupScope.ServiceProvider.GetRequiredService<IWorkloadRepository>();
+        var startupLogger = startupScope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+        var missingCount = 0;
+        foreach (var tenantId in mockEntraStore.ListKnownPlatformTenantIds())
+        {
+            missingCount += await mockEntraStore.ReconcileWorkloadResourcesAsync(
+                B2B.Portal.Domain.ValueObjects.TenantContext.Create(tenantId), workloadRepo, startupLogger, CancellationToken.None);
+        }
+
         Console.WriteLine(
-            $"[B2B.Portal.Api] Mock-Entra-Store beim Start hydriert: {mockEntraStore.ListUsers().Count} Benutzer bekannt.");
+            $"[B2B.Portal.Api] Mock-Entra-Store beim Start hydriert: {mockEntraStore.ListUsers().Count} Benutzer, " +
+            $"{mockEntraStore.ListGroups().Count} Gruppen bekannt" +
+            (missingCount > 0 ? $" ({missingCount} Workload-Ressource(n) ohne bekannte Verzeichnis-Gruppe, siehe Warnungen oben)." : "."));
     }
     catch (Exception ex)
     {
@@ -776,7 +793,7 @@ app.MapPost("/api/workloads/{workloadId:guid}/resources", async (
         if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
 
         var resource = await service.UpsertResourceAsync(
-            tenantCtx.Current, workloadId, resourceId: null, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct);
+            tenantCtx.Current, workloadId, resourceId: null, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct, body.DisplayName);
         return Results.Ok(resource);
     }
     catch (InvalidOperationException ex)
@@ -796,7 +813,7 @@ app.MapPut("/api/workloads/{workloadId:guid}/resources/{resourceId:guid}", async
         if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
 
         var resource = await service.UpsertResourceAsync(
-            tenantCtx.Current, workloadId, resourceId, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct);
+            tenantCtx.Current, workloadId, resourceId, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct, body.DisplayName);
         return Results.Ok(resource);
     }
     catch (InvalidOperationException ex)
@@ -847,7 +864,7 @@ app.MapPost("/api/workloads/{workloadId:guid}/resources/attach", async (
         if (!userCtx.Current.CanManageWorkload(workload.Owner)) return Results.StatusCode(403);
 
         var resource = await service.AttachResourceAsync(
-            tenantCtx.Current, workloadId, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct);
+            tenantCtx.Current, workloadId, body.ResourceType, body.ExternalId, actor: userCtx.Current.Mail, ct, body.DisplayName);
         return Results.Ok(resource);
     }
     catch (InvalidOperationException ex)
@@ -1397,6 +1414,28 @@ if (mode == "LOCAL_MOCK")
         return Results.Ok(store.ListUsers());
     });
 
+    // Manueller Trigger fuer den periodischen Discovery-Abgleich (Erweiterung 2026-08-31
+    // "EntraId-Persistenz + Discovery-Reconciliation"): DiscoveryReconciliationWorker
+    // (B2B.Portal.Worker) laeuft alle 10 Minuten automatisch im Worker-Prozess und ist von
+    // dort nicht per HTTP erreichbar — dieser Endpoint fuehrt denselben Abgleich
+    // (MockEntraDirectoryStore.ReconcileWorkloadResourcesAsync: prueft ob alle von Workloads
+    // referenzierten Ressourcen im Mock-Entra-Verzeichnis noch existieren) synchron fuer den
+    // aktuellen Tenant aus und gibt das Ergebnis direkt zurueck, ohne auf den naechsten
+    // Worker-Zyklus warten zu muessen.
+    app.MapPost("/api/dev/discovery/reconcile", async (
+        ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+        MockEntraDirectoryStore mockEntraStore, IWorkloadRepository workloadRepo,
+        ILogger<Program> logger, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var missingCount = await mockEntraStore.ReconcileWorkloadResourcesAsync(tenantCtx.Current, workloadRepo, logger, ct);
+        return Results.Ok(new { tenantId = tenantCtx.Current.PlatformTenantId, missingResourceCount = missingCount });
+    });
+
     app.MapGet("/api/dev/mock-entra/login-users", async (
         MockEntraDirectoryStore store,
         IGuestAccountRepository guestRepo, IWorkloadRepository workloadRepo, IAssignmentRepository assignmentRepo,
@@ -1640,23 +1679,20 @@ if (mode == "LOCAL_MOCK")
         var correlationId = Guid.NewGuid();
 
         var workload = DevSeedData.BuildWorkload(tenantId, body?.WorkloadName);
-        await workloadRepo.UpsertAsync(workload, ct);
         var defaultWorkload = DevSeedData.BuildDefaultWorkload(tenantId);
+        // EnsureGroup sucht/erstellt per DisplayName und liefert die stabile ObjectId zurueck —
+        // die schreiben wir jetzt auf ExternalId zurueck (vorher blieb ExternalId der
+        // hartcodierte Name aus DevSeedData, siehe WorkloadResource-Kommentar: ExternalId muss
+        // immer die ObjectId sein, DisplayName der Anzeigename).
+        foreach (var resource in workload.Resources.Where(r => MockEntraDirectoryStore.IsMockEntraGroupResource(r) && r.DisplayName is not null))
+        {
+            resource.ExternalId = mockEntraStore.EnsureGroup(
+                resource.ResourceType,
+                resource.DisplayName!,
+                new Dictionary<string, string> { ["ResourceType"] = resource.ResourceType });
+        }
+        await workloadRepo.UpsertAsync(workload, ct);
         await workloadRepo.UpsertAsync(defaultWorkload, ct);
-        foreach (var resource in workload.Resources.Where(r => IsMockEntraGroupResource(r) && r.ExternalId is not null))
-        {
-            mockEntraStore.EnsureGroup(
-                resource.ResourceType,
-                resource.ExternalId!,
-                new Dictionary<string, string> { ["ResourceType"] = resource.ResourceType });
-        }
-        foreach (var resource in defaultWorkload.Resources.Where(r => IsMockEntraGroupResource(r) && r.ExternalId is not null))
-        {
-            mockEntraStore.EnsureGroup(
-                resource.ResourceType,
-                resource.ExternalId!,
-                new Dictionary<string, string> { ["ResourceType"] = resource.ResourceType });
-        }
         foreach (var group in mockEntraStore.ListGroups())
         {
             if (DevSeedData.MatchesAnyPattern(group.DisplayName, defaultWorkload.ResourceNamePatterns))
@@ -1665,7 +1701,8 @@ if (mode == "LOCAL_MOCK")
                 {
                     WorkloadId = defaultWorkload.Id,
                     ResourceType = group.ResourceProvisioningOptions.Contains("Team") ? "Team" : group.GroupTypes.Contains("Unified") ? "M365Group" : "SecurityGroup",
-                    ExternalId = group.DisplayName,
+                    ExternalId = group.ObjectId,
+                    DisplayName = group.DisplayName,
                     Managed = false,
                 });
             }
@@ -1964,6 +2001,16 @@ static async Task<JobStatusResponse> ToJobStatusResponseAsync(
         [.. job.Log.Select(l => new JobLogEntryResponse(l.Timestamp, l.Status.ToString(), l.Message))]);
 }
 
+/// <summary>
+/// Haelt den Mock-Entra-Store fuer einen Tenant aktuell, bevor Endpunkte darauf lesen
+/// (/api/dev/mock-entra/*, Szenario-Diff): synct GuestAccounts als MockEntraUser (Erweiterung
+/// 2026-08-30 (Teil 3)) und Application-Sign-ins fuer aktive Assignments, und prueft
+/// zusaetzlich per ReconcileWorkloadResourcesAsync, ob alle von Workloads referenzierten
+/// Ressourcen im (dedizierten Container "entraid" persistierten) Verzeichnis noch bekannt
+/// sind. Anders als vor Erweiterung 2026-08-31 ("EntraId-Persistenz + Discovery-
+/// Reconciliation") werden fehlende Gruppen NICHT mehr automatisch nachgebaut — siehe
+/// Kommentar an MockEntraDirectoryStore.ReconcileWorkloadResourcesAsync.
+/// </summary>
 static async Task HydrateMockEntraFromRepositoriesAsync(
     B2B.Portal.Domain.ValueObjects.TenantContext tenant,
     MockEntraDirectoryStore mockEntraStore,
@@ -1984,12 +2031,9 @@ static async Task HydrateMockEntraFromRepositoriesAsync(
     var workloads = await workloadRepo.ListAsync(tenant, ct);
     foreach (var workload in workloads)
     {
-        foreach (var resource in workload.Resources.Where(r => IsMockEntraGroupResource(r) && !string.IsNullOrWhiteSpace(r.ExternalId)))
+        if (string.IsNullOrWhiteSpace(workload.ApplicationExternalId))
         {
-            mockEntraStore.EnsureGroup(
-                resource.ResourceType,
-                resource.ExternalId!,
-                new Dictionary<string, string> { ["ResourceType"] = resource.ResourceType, ["WorkloadId"] = workload.Id.ToString() });
+            continue;
         }
 
         var assignments = await assignmentRepo.ListByWorkloadAsync(tenant, workload.Id, ct);
@@ -2000,38 +2044,19 @@ static async Task HydrateMockEntraFromRepositoriesAsync(
                 continue;
             }
 
-            if (!string.IsNullOrWhiteSpace(workload.ApplicationExternalId)
-                && mockEntraStore.ListApplicationSignIns(workload.ApplicationExternalId)
-                    .All(s => !string.Equals(s.EntraObjectId, entraObjectId, StringComparison.OrdinalIgnoreCase)))
+            if (mockEntraStore.ListApplicationSignIns(workload.ApplicationExternalId)
+                .All(s => !string.Equals(s.EntraObjectId, entraObjectId, StringComparison.OrdinalIgnoreCase)))
             {
                 mockEntraStore.UpsertApplicationSignIn(
                     workload.ApplicationExternalId,
                     entraObjectId,
                     DateTimeOffset.UtcNow.AddDays(-Math.Abs(assignment.Id.GetHashCode() % 90)));
             }
-
-            var role = workload.Roles.FirstOrDefault(r => r.Id == assignment.RoleId);
-            if (role is null)
-            {
-                continue;
-            }
-
-            var groupResources = workload.Resources
-                .Where(r => role.ResourceMappings.Contains(r.Id))
-                .Where(IsMockEntraGroupResource)
-                .Where(r => !string.IsNullOrWhiteSpace(r.ExternalId));
-            foreach (var resource in groupResources)
-            {
-                mockEntraStore.AddMember(resource.ExternalId!, entraObjectId);
-            }
         }
     }
-}
 
-static bool IsMockEntraGroupResource(WorkloadResource resource) =>
-    resource.ResourceType.Equals("SecurityGroup", StringComparison.OrdinalIgnoreCase)
-    || resource.ResourceType.Equals("M365Group", StringComparison.OrdinalIgnoreCase)
-    || resource.ResourceType.Equals("Team", StringComparison.OrdinalIgnoreCase);
+    await mockEntraStore.ReconcileWorkloadResourcesAsync(tenant, workloadRepo, logger: null, ct);
+}
 
 static MockEntraUser ToMockEntraUser(UpsertMockEntraUserBody body)
 {
@@ -2157,8 +2182,8 @@ public sealed record UpsertWorkloadRoleBody(
     string? ApplicationId,
     string? ApplicationRoleId,
     List<Guid> ResourceMappings);
-public sealed record UpsertWorkloadResourceBody(string ResourceType, string? ExternalId);
-public sealed record AttachWorkloadResourceBody(string ResourceType, string ExternalId);
+public sealed record UpsertWorkloadResourceBody(string ResourceType, string? ExternalId, string? DisplayName = null);
+public sealed record AttachWorkloadResourceBody(string ResourceType, string ExternalId, string? DisplayName = null);
 
 /// <summary>Body fuer PUT /api/reminder-policy (Erweiterung 2026-08-30 "Invitation Reminder
 /// Worker") — die komplette geordnete Stufenliste wird ersetzt (kein partielles Patchen
@@ -2244,13 +2269,19 @@ public static class DevSeedData
         };
         workload.ResourceNamePatterns.AddRange(["SG-MERIDIAN-*", "GRP-MERIDIAN-*", "TEAM-MERIDIAN-*"]);
 
+        // ExternalId bleibt hier bewusst leer: diese Seed-Ressourcen haben noch keine
+        // Entra-Object-ID, bis /api/dev/seed/large-workload sie ueber
+        // MockEntraDirectoryStore.EnsureGroup anlegt und die zurueckgegebene ObjectId
+        // zurueckschreibt (siehe dortiger Aufrufer). DisplayName traegt den Namen, der bisher
+        // hier in ExternalId stand (siehe WorkloadResource-Kommentar: ExternalId = ObjectId,
+        // DisplayName = Anzeigename).
         var resources = new[]
         {
-            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "SG-MERIDIAN-READ", Managed = true },
-            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", ExternalId = "SG-MERIDIAN-CONTRIBUTE", Managed = true },
-            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "M365Group", ExternalId = "GRP-MERIDIAN-COLLAB", Managed = true },
-            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "Team", ExternalId = "TEAM-MERIDIAN-CORE", Managed = true },
-            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "AppRole", ExternalId = "APP-MERIDIAN-ADMIN", Managed = false },
+            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", DisplayName = "SG-MERIDIAN-READ", Managed = true },
+            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "SecurityGroup", DisplayName = "SG-MERIDIAN-CONTRIBUTE", Managed = true },
+            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "M365Group", DisplayName = "GRP-MERIDIAN-COLLAB", Managed = true },
+            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "Team", DisplayName = "TEAM-MERIDIAN-CORE", Managed = true },
+            new WorkloadResource { WorkloadId = workload.Id, ResourceType = "AppRole", ExternalId = "APP-MERIDIAN-ADMIN", DisplayName = "APP-MERIDIAN-ADMIN", Managed = false },
         };
         workload.Resources.AddRange(resources);
 
