@@ -19,7 +19,7 @@ public sealed class InvitationHandler(
 {
     public string JobType => JobTypes.InviteGuest;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var payload = job.Payload;
         var mail = payload.GetProperty("Mail").GetString()!;
@@ -30,7 +30,7 @@ public sealed class InvitationHandler(
         if (guest is null)
         {
             logger.LogWarning("InviteGuest: GuestAccount {EntityId} nicht gefunden.", job.EntityId);
-            return;
+            return $"GuestAccount {job.EntityId} nicht gefunden — keine Einladung versendet.";
         }
 
         var entraObjectId = await guestDirectory.InviteGuestAsync(
@@ -47,6 +47,8 @@ public sealed class InvitationHandler(
         logger.LogInformation(
             "Guest {GuestId} eingeladen. EntraObjectId={EntraObjectId} CorrelationId={CorrelationId}",
             guest.Id, entraObjectId, job.CorrelationId);
+
+        return $"{displayName} ({mail}) eingeladen — EntraObjectId={entraObjectId}, Redemption-Link erzeugt.";
     }
 }
 
@@ -55,12 +57,13 @@ public sealed class ResendInvitationHandler(IGuestDirectory guestDirectory, ILog
 {
     public string JobType => JobTypes.ResendInvitation;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var directoryTenantId = job.DirectoryTenantId ?? string.Empty;
         var entraObjectId = job.Payload.TryGetProperty("EntraObjectId", out var v) ? v.GetString() ?? "" : "";
         await guestDirectory.ResendInvitationAsync(directoryTenantId, entraObjectId, ct);
         logger.LogInformation("Invitation erneut gesendet für {EntraObjectId}", entraObjectId);
+        return $"Einladung erneut gesendet an EntraObjectId={entraObjectId}.";
     }
 }
 
@@ -84,7 +87,7 @@ public sealed class InvitationReminderHandler(
 {
     public string JobType => JobTypes.InvitationReminder;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var payload = job.Payload;
         var stageNumber = payload.GetProperty("StageNumber").GetInt32();
@@ -99,7 +102,7 @@ public sealed class InvitationReminderHandler(
         if (guest is null)
         {
             logger.LogWarning("InvitationReminder: GuestAccount {EntityId} nicht gefunden.", job.EntityId);
-            return;
+            return $"GuestAccount {job.EntityId} nicht gefunden — kein Reminder versendet.";
         }
 
         var templateData = new Dictionary<string, string>
@@ -136,6 +139,8 @@ public sealed class InvitationReminderHandler(
         logger.LogInformation(
             "InvitationReminder Stufe {StageNumber} gesendet an {Recipient} (Guest {GuestId}, " +
             "CorrelationId={CorrelationId}).", stageNumber, guest.Mail, guest.Id, job.CorrelationId);
+
+        return $"Reminder Stufe {stageNumber} ('{templateId}') gesendet an {guest.Mail} ({daysSinceInvite} Tage seit Einladung).";
     }
 
     private static string ReplacePlaceholders(

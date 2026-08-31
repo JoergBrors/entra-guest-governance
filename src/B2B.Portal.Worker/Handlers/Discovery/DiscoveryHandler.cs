@@ -20,11 +20,13 @@ public sealed class DiscoveryHandler(
 {
     public string JobType => JobTypes.RunDiscovery;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var directoryTenantId = job.DirectoryTenantId ?? string.Empty;
         var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
         var guests = await guestDirectory.ListGuestsAsync(directoryTenantId, ct);
+        var newlyDiscovered = 0;
+        var membershipCount = 0;
 
         foreach (var snapshot in guests)
         {
@@ -44,6 +46,7 @@ public sealed class DiscoveryHandler(
             {
                 guest.TransitionTo(GuestAccountState.Discovered);
                 await guestRepository.UpsertAsync(guest, ct);
+                newlyDiscovered++;
             }
 
             var memberships = await guestDirectory.ListMembershipsAsync(directoryTenantId, snapshot.EntraObjectId, ct);
@@ -57,11 +60,15 @@ public sealed class DiscoveryHandler(
                     ExternalResourceId = m.GroupId,
                     Classification = AccessClassification.Unclassified,
                 }, ct);
+                membershipCount++;
             }
         }
 
         logger.LogInformation(
             "Discovery abgeschlossen: {Count} Gäste für Tenant {DirectoryTenantId}. CorrelationId={CorrelationId}",
             guests.Count, directoryTenantId, job.CorrelationId);
+
+        return $"Tenant {directoryTenantId}: {guests.Count} Gast/Gaeste gescannt, {newlyDiscovered} neu entdeckt, " +
+            $"{membershipCount} Mitgliedschaft(en) als Unclassified ResourceAccess erfasst.";
     }
 }

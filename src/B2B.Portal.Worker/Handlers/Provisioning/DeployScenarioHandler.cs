@@ -27,7 +27,7 @@ public sealed class DeployScenarioHandler(
 {
     public string JobType => JobTypes.DeployScenario;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var scenarioId = Guid.Parse(job.EntityId);
         var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
@@ -36,7 +36,7 @@ public sealed class DeployScenarioHandler(
         if (scenario is null)
         {
             logger.LogWarning("DeployScenario: WorkloadScenario {ScenarioId} nicht gefunden.", scenarioId);
-            return;
+            return $"WorkloadScenario {scenarioId} nicht gefunden — nichts deployt.";
         }
 
         var workload = await workloadRepository.GetAsync(tenant, scenario.WorkloadId, ct);
@@ -45,13 +45,14 @@ public sealed class DeployScenarioHandler(
             logger.LogWarning(
                 "DeployScenario: Workload {WorkloadId} für Szenario {ScenarioId} nicht gefunden.",
                 scenario.WorkloadId, scenarioId);
-            return;
+            return $"Workload {scenario.WorkloadId} fuer Szenario '{scenario.Name}' nicht gefunden — nichts deployt.";
         }
 
         var resourcesById = workload.Resources.ToDictionary(r => r.Id);
         var deployedCount = 0;
         var skippedCount = 0;
         var workloadChanged = false;
+        var deployedResourceNames = new List<string>();
 
         foreach (var rule in scenario.Rules)
         {
@@ -107,6 +108,7 @@ public sealed class DeployScenarioHandler(
                 workloadChanged = true;
             }
             deployedCount++;
+            deployedResourceNames.Add(namePattern);
         }
 
         if (workloadChanged)
@@ -119,6 +121,9 @@ public sealed class DeployScenarioHandler(
             "DeployScenario {ScenarioId} ({Name}): {Deployed} Ressourcen deployt, {Skipped} durch Bedingung " +
             "übersprungen. CorrelationId={CorrelationId}",
             scenarioId, scenario.Name, deployedCount, skippedCount, job.CorrelationId);
+
+        return $"Szenario '{scenario.Name}' auf Workload '{workload.Name}': {deployedCount} Ressource(n) deployt " +
+            $"[{string.Join(", ", deployedResourceNames)}], {skippedCount} durch Bedingung uebersprungen.";
     }
 
     // Fakten-Sammlung für die JSONLogic-Auswertung einer einzelnen Regel ("gather facts,

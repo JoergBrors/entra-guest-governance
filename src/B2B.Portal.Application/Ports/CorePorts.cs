@@ -28,6 +28,43 @@ public interface IJobQueue
 }
 
 /// <summary>
+/// Persistenter Steuerungs-/Statuszustand eines periodischen Worker-BackgroundService
+/// (Erweiterung 2026-08-31 "Job/Worker-Audit — Worker-Steuerung"): IsPaused steuert, ob der
+/// naechste PeriodicTimer-Tick tatsaechlich ausgefuehrt wird oder uebersprungen bleibt (siehe
+/// PeriodicWorkerBase) — persistent, damit ein pausierter Worker auch einen Prozessneustart
+/// pausiert bleibt, statt beim naechsten "dotnet run" automatisch wieder loszulaufen. Die
+/// Last*-Felder tragen den Ausgang des letzten Laufs (unabhaengig von Pause/Resume) fuer die
+/// Worker-Detailansicht (GET /api/dev/workers).
+/// </summary>
+public sealed record WorkerControlState(
+    string WorkerName,
+    bool IsPaused,
+    string? PausedBy,
+    DateTimeOffset? PausedAt,
+    DateTimeOffset? LastRunStartedAt,
+    DateTimeOffset? LastRunCompletedAt,
+    bool? LastRunSucceeded,
+    string? LastRunSummary,
+    string? LastTriggeredBy,
+    DateTimeOffset? TriggerRequestedAt = null,
+    string? TriggerRequestedBy = null);
+
+/// <summary>
+/// Persistenz fuer WorkerControlState — ein Dokument je periodischem Worker (Erweiterung
+/// 2026-08-31). Container "jobs" (siehe CosmosWorkerControlRepository), weil Worker-Steuerung
+/// inhaltlich zur Job-/Ausfuehrungs-Infrastruktur gehoert, nicht zum fachlichen Desired/Actual
+/// State.
+/// </summary>
+public interface IWorkerControlRepository
+{
+    Task<IReadOnlyList<WorkerControlState>> ListAllAsync(CancellationToken ct);
+
+    Task<WorkerControlState?> GetAsync(string workerName, CancellationToken ct);
+
+    Task UpsertAsync(WorkerControlState state, CancellationToken ct);
+}
+
+/// <summary>
 /// E-Mail ist ein eigener technischer Provider, kein Bestandteil der Fachlogik
 /// (MVP-Dokument Abschnitt 6). LOCAL_MOCK rendert eine Vorschau statt zu senden.
 /// </summary>

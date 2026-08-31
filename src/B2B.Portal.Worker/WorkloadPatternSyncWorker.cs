@@ -38,22 +38,13 @@ public sealed class WorkloadPatternSyncWorker(
     IJobRepository jobRepository,
     MockEntraDirectoryStore mockEntraStore,
     ProvisioningService provisioningService,
-    ILogger<WorkloadPatternSyncWorker> logger) : BackgroundService
+    IWorkerControlRepository workerControlRepository,
+    ILogger<WorkloadPatternSyncWorker> logger)
+    : PeriodicWorkerBase(nameof(WorkloadPatternSyncWorker), TimeSpan.FromMinutes(10), workerControlRepository, logger)
 {
     private static readonly HashSet<JobStatus> InFlightStatuses = [JobStatus.Pending, JobStatus.Running];
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        var interval = TimeSpan.FromMinutes(10);
-        await ScanAsync(stoppingToken);
-        using var timer = new PeriodicTimer(interval);
-        while (await timer.WaitForNextTickAsync(stoppingToken))
-        {
-            await ScanAsync(stoppingToken);
-        }
-    }
-
-    private async Task ScanAsync(CancellationToken ct)
+    protected override async Task<string?> RunOnceAsync(CancellationToken ct)
     {
         // Multi-Tenant-Scan wie InvitationReminderWorker/ApplicationSignInSyncWorker — siehe
         // identischer Kommentar dort.
@@ -63,68 +54,64 @@ public sealed class WorkloadPatternSyncWorker(
             tenantIds = [configuration["VITE_DEV_PLATFORM_TENANT_ID"] ?? "dev-tenant-a"];
         }
 
+        var summaries = new List<string>();
         foreach (var tenantId in tenantIds)
         {
-            await ScanTenantAsync(tenantId, ct);
+            summaries.Add(await ScanTenantAsync(tenantId, ct));
         }
+        return string.Join(" | ", summaries);
     }
 
-    private async Task ScanTenantAsync(string tenantId, CancellationToken ct)
+    private async Task<string> ScanTenantAsync(string tenantId, CancellationToken ct)
     {
-        try
+        var tenant = TenantContext.Create(tenantId);
+        var workloads = await workloadRepository.ListAsync(tenant, ct);
+        var patternWorkloads = workloads.Where(w => w.Active && w.ResourceNamePatterns.Count > 0).ToList();
+        if (patternWorkloads.Count == 0)
         {
-            var tenant = TenantContext.Create(tenantId);
-            var workloads = await workloadRepository.ListAsync(tenant, ct);
-            var patternWorkloads = workloads.Where(w => w.Active && w.ResourceNamePatterns.Count > 0).ToList();
-            if (patternWorkloads.Count == 0)
+            return $"Tenant {tenantId}: keine aktiven Workloads mit ResourceNamePatterns.";
+        }
+
+        var existingJobs = await jobRepository.ListAsync(tenant, ct);
+        var enqueuedCount = 0;
+
+        foreach (var workload in patternWorkloads)
+        {
+            // Exakt dieselbe Hash-Bildung wie EnqueuePatternSyncJobAsync (Program.cs) —
+            // dort KEIN DesiredStateHasher.Hash(...) (SHA256), sondern ein roher
+            // "{workloadId}:{patterns}"-String. Muss identisch bleiben, damit ein manuell
+            // (API, Workload speichern) und ein periodisch (dieser Worker) ausgeloester Job
+            // fuer dasselbe Pattern-Set als derselbe "Desired State" erkannt werden.
+            var hash = $"{workload.Id}:{string.Join('|', workload.ResourceNamePatterns)}";
+
+            var alreadyInFlight = existingJobs.Any(j =>
+                j.JobType == JobTypes.SyncWorkloadPatternResources
+                && j.WorkloadId == workload.Id
+                && InFlightStatuses.Contains(j.Status));
+            if (alreadyInFlight)
             {
-                return;
+                continue;
             }
 
-            var existingJobs = await jobRepository.ListAsync(tenant, ct);
-
-            foreach (var workload in patternWorkloads)
-            {
-                // Exakt dieselbe Hash-Bildung wie EnqueuePatternSyncJobAsync (Program.cs) —
-                // dort KEIN DesiredStateHasher.Hash(...) (SHA256), sondern ein roher
-                // "{workloadId}:{patterns}"-String. Muss identisch bleiben, damit ein manuell
-                // (API, Workload speichern) und ein periodisch (dieser Worker) ausgeloester Job
-                // fuer dasselbe Pattern-Set als derselbe "Desired State" erkannt werden.
-                var hash = $"{workload.Id}:{string.Join('|', workload.ResourceNamePatterns)}";
-
-                var alreadyInFlight = existingJobs.Any(j =>
-                    j.JobType == JobTypes.SyncWorkloadPatternResources
-                    && j.WorkloadId == workload.Id
-                    && InFlightStatuses.Contains(j.Status));
-                if (alreadyInFlight)
+            var correlationId = Guid.NewGuid();
+            await provisioningService.EnqueueJobAsync(
+                tenant.PlatformTenantId, tenant.DirectoryTenantId, JobTypes.SyncWorkloadPatternResources,
+                nameof(Workload), workload.Id.ToString(), hash,
+                new
                 {
-                    continue;
-                }
+                    WorkloadId = workload.Id,
+                    ResourceNamePatterns = workload.ResourceNamePatterns.ToArray(),
+                    Actor = "WorkloadPatternSyncWorker",
+                },
+                correlationId, ct,
+                triggeredBy: "WorkloadPatternSyncWorker", workloadId: workload.Id);
 
-                var correlationId = Guid.NewGuid();
-                await provisioningService.EnqueueJobAsync(
-                    tenant.PlatformTenantId, tenant.DirectoryTenantId, JobTypes.SyncWorkloadPatternResources,
-                    nameof(Workload), workload.Id.ToString(), hash,
-                    new
-                    {
-                        WorkloadId = workload.Id,
-                        ResourceNamePatterns = workload.ResourceNamePatterns.ToArray(),
-                        Actor = "WorkloadPatternSyncWorker",
-                    },
-                    correlationId, ct,
-                    triggeredBy: "WorkloadPatternSyncWorker", workloadId: workload.Id);
+            logger.LogInformation(
+                "SyncWorkloadPatternResources-Job fuer Workload {WorkloadId} ({WorkloadName}) periodisch eingereiht.",
+                workload.Id, workload.Name);
+            enqueuedCount++;
+        }
 
-                logger.LogInformation(
-                    "SyncWorkloadPatternResources-Job fuer Workload {WorkloadId} ({WorkloadName}) periodisch eingereiht.",
-                    workload.Id, workload.Name);
-            }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "WorkloadPatternSyncWorker konnte Workload-Patterns fuer Tenant {Tenant} nicht scannen.", tenantId);
-        }
+        return $"Tenant {tenantId}: {patternWorkloads.Count} Workload(s) mit Patterns geprueft, {enqueuedCount} Sync-Job(s) eingereiht.";
     }
 }

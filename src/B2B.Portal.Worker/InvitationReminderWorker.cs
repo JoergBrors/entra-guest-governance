@@ -25,20 +25,11 @@ public sealed class InvitationReminderWorker(
     IWorkloadRepository workloadRepository,
     MockEntraDirectoryStore mockEntraStore,
     ProvisioningService provisioningService,
-    ILogger<InvitationReminderWorker> logger) : BackgroundService
+    IWorkerControlRepository workerControlRepository,
+    ILogger<InvitationReminderWorker> logger)
+    : PeriodicWorkerBase(nameof(InvitationReminderWorker), TimeSpan.FromMinutes(10), workerControlRepository, logger)
 {
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        var interval = TimeSpan.FromMinutes(10);
-        await ScanAsync(stoppingToken);
-        using var timer = new PeriodicTimer(interval);
-        while (await timer.WaitForNextTickAsync(stoppingToken))
-        {
-            await ScanAsync(stoppingToken);
-        }
-    }
-
-    private async Task ScanAsync(CancellationToken ct)
+    protected override async Task<string?> RunOnceAsync(CancellationToken ct)
     {
         // Erweiterung 2026-08-30 (Teil 3 "Multi-Tenant-Scanner"): siehe identischer Kommentar
         // in ApplicationSignInSyncWorker.SyncAsync — alle bekannten Tenants statt eines
@@ -49,79 +40,75 @@ public sealed class InvitationReminderWorker(
             tenantIds = [configuration["VITE_DEV_PLATFORM_TENANT_ID"] ?? "dev-tenant-a"];
         }
 
+        var summaries = new List<string>();
         foreach (var tenantId in tenantIds)
         {
-            await ScanTenantAsync(tenantId, ct);
+            summaries.Add(await ScanTenantAsync(tenantId, ct));
         }
+        return string.Join(" | ", summaries);
     }
 
-    private async Task ScanTenantAsync(string tenantId, CancellationToken ct)
+    private async Task<string> ScanTenantAsync(string tenantId, CancellationToken ct)
     {
-        try
-        {
-            var tenant = TenantContext.Create(tenantId);
+        var tenant = TenantContext.Create(tenantId);
 
-            var policy = await reminderPolicyRepository.GetAsync(tenant, ct);
-            if (policy is null || policy.Stages.Count == 0)
+        var policy = await reminderPolicyRepository.GetAsync(tenant, ct);
+        if (policy is null || policy.Stages.Count == 0)
+        {
+            logger.LogDebug("InvitationReminderWorker: keine ReminderPolicy fuer Tenant {Tenant} konfiguriert.", tenantId);
+            return $"Tenant {tenantId}: keine ReminderPolicy konfiguriert.";
+        }
+
+        var orderedStages = policy.Stages.OrderBy(s => s.StageNumber).ToList();
+        var guests = await guestRepository.ListAsync(tenant, ct);
+        var invitedGuests = guests.Where(g => g.AccountState == GuestAccountState.Invited).ToList();
+        var now = DateTimeOffset.UtcNow;
+        var remindersSent = 0;
+
+        foreach (var guest in invitedGuests)
+        {
+            // Naechste faellige Stufe: Stufe 1, wenn noch nie gesendet, sonst die direkt
+            // auf LastReminderStageSent folgende Stufe (nie eine Stufe ueberspringen).
+            var nextStageNumber = (guest.LastReminderStageSent ?? 0) + 1;
+            var nextStage = orderedStages.FirstOrDefault(s => s.StageNumber == nextStageNumber);
+            if (nextStage is null)
             {
-                logger.LogDebug("InvitationReminderWorker: keine ReminderPolicy fuer Tenant {Tenant} konfiguriert.", tenantId);
-                return;
+                continue;
             }
 
-            var orderedStages = policy.Stages.OrderBy(s => s.StageNumber).ToList();
-            var guests = await guestRepository.ListAsync(tenant, ct);
-            var invitedGuests = guests.Where(g => g.AccountState == GuestAccountState.Invited).ToList();
-            var now = DateTimeOffset.UtcNow;
-
-            foreach (var guest in invitedGuests)
+            var daysSinceInvite = (int)(now - guest.CreatedAt).TotalDays;
+            if (daysSinceInvite < nextStage.DaysAfterInvite)
             {
-                // Naechste faellige Stufe: Stufe 1, wenn noch nie gesendet, sonst die direkt
-                // auf LastReminderStageSent folgende Stufe (nie eine Stufe ueberspringen).
-                var nextStageNumber = (guest.LastReminderStageSent ?? 0) + 1;
-                var nextStage = orderedStages.FirstOrDefault(s => s.StageNumber == nextStageNumber);
-                if (nextStage is null)
-                {
-                    continue;
-                }
-
-                var daysSinceInvite = (int)(now - guest.CreatedAt).TotalDays;
-                if (daysSinceInvite < nextStage.DaysAfterInvite)
-                {
-                    continue;
-                }
-
-                var workloadName = await ResolveWorkloadNameAsync(tenant, guest.Id, ct);
-
-                var correlationId = Guid.NewGuid();
-                var hash = DesiredStateHasher.Hash(
-                    "InvitationReminder", guest.Id.ToString(), nextStage.StageNumber.ToString(), correlationId.ToString());
-                var payload = new
-                {
-                    StageNumber = nextStage.StageNumber,
-                    nextStage.TemplateId,
-                    nextStage.TemplateSubject,
-                    nextStage.TemplateBody,
-                    WorkloadName = workloadName,
-                    DaysSinceInvite = daysSinceInvite,
-                };
-
-                await provisioningService.EnqueueJobAsync(
-                    tenant.PlatformTenantId, tenant.DirectoryTenantId, JobTypes.InvitationReminder,
-                    nameof(GuestAccount), guest.Id.ToString(), hash, payload, correlationId, ct,
-                    triggeredBy: "InvitationReminderWorker");
-
-                logger.LogInformation(
-                    "InvitationReminder-Job fuer Gast {GuestId} Stufe {StageNumber} eingereiht (DaysSinceInvite={Days}).",
-                    guest.Id, nextStage.StageNumber, daysSinceInvite);
+                continue;
             }
+
+            var workloadName = await ResolveWorkloadNameAsync(tenant, guest.Id, ct);
+
+            var correlationId = Guid.NewGuid();
+            var hash = DesiredStateHasher.Hash(
+                "InvitationReminder", guest.Id.ToString(), nextStage.StageNumber.ToString(), correlationId.ToString());
+            var payload = new
+            {
+                StageNumber = nextStage.StageNumber,
+                nextStage.TemplateId,
+                nextStage.TemplateSubject,
+                nextStage.TemplateBody,
+                WorkloadName = workloadName,
+                DaysSinceInvite = daysSinceInvite,
+            };
+
+            await provisioningService.EnqueueJobAsync(
+                tenant.PlatformTenantId, tenant.DirectoryTenantId, JobTypes.InvitationReminder,
+                nameof(GuestAccount), guest.Id.ToString(), hash, payload, correlationId, ct,
+                triggeredBy: "InvitationReminderWorker");
+
+            logger.LogInformation(
+                "InvitationReminder-Job fuer Gast {GuestId} Stufe {StageNumber} eingereiht (DaysSinceInvite={Days}).",
+                guest.Id, nextStage.StageNumber, daysSinceInvite);
+            remindersSent++;
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "InvitationReminderWorker konnte offene Einladungen nicht scannen.");
-        }
+
+        return $"Tenant {tenantId}: {invitedGuests.Count} eingeladene(r) Gast/Gaeste geprueft, {remindersSent} Reminder-Job(s) eingereiht.";
     }
 
     private async Task<string?> ResolveWorkloadNameAsync(TenantContext tenant, Guid guestId, CancellationToken ct)

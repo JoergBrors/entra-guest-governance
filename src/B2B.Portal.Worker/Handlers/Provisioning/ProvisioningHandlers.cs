@@ -21,7 +21,7 @@ public sealed class GrantWorkloadRoleHandler(
 {
     public string JobType => JobTypes.GrantWorkloadRole;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var assignmentId = Guid.Parse(job.EntityId);
         var guestId = job.Payload.GetProperty("GuestId").GetGuid();
@@ -32,7 +32,7 @@ public sealed class GrantWorkloadRoleHandler(
         if (assignment is null)
         {
             logger.LogWarning("GrantWorkloadRole: Assignment {AssignmentId} nicht gefunden.", assignmentId);
-            return;
+            return $"Assignment {assignmentId} nicht gefunden.";
         }
 
         if (assignment.Status == AssignmentStatus.Active)
@@ -40,7 +40,7 @@ public sealed class GrantWorkloadRoleHandler(
             logger.LogInformation(
                 "GrantWorkloadRole: Assignment {AssignmentId} bereits aktiv — idempotent, kein Write.",
                 assignmentId);
-            return;
+            return $"Assignment {assignmentId} bereits aktiv — kein Write (idempotent).";
         }
 
         var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
@@ -52,10 +52,12 @@ public sealed class GrantWorkloadRoleHandler(
             logger.LogWarning(
                 "GrantWorkloadRole: Fakten fehlen für Assignment {AssignmentId} (Guest/EntraObjectId/Workload/Role).",
                 assignmentId);
-            return;
+            return $"Assignment {assignmentId}: fehlende Fakten (Guest/EntraObjectId={guest?.EntraObjectId ?? "null"}/" +
+                $"Workload={workload?.Id.ToString() ?? "null"}/Role={role?.Id.ToString() ?? "null"}) — kein Grant ausgefuehrt.";
         }
 
         var grantedResources = new List<string>();
+        var skippedResources = new List<string>();
         foreach (var resourceId in role.ResourceMappings)
         {
             var resource = workload.Resources.FirstOrDefault(r => r.Id == resourceId);
@@ -65,6 +67,7 @@ public sealed class GrantWorkloadRoleHandler(
                     "GrantWorkloadRole: Assignment {AssignmentId} — Ressource {ResourceId} in Rolle {RoleName} " +
                     "hat keine ExternalId, wird uebersprungen.",
                     assignmentId, resourceId, role.Name);
+                skippedResources.Add(resourceId.ToString());
                 continue;
             }
 
@@ -91,6 +94,10 @@ public sealed class GrantWorkloadRoleHandler(
             "({WorkloadName}) Rolle={RoleName} Ressourcen=[{Resources}] CorrelationId={CorrelationId}",
             assignmentId, guest.Id, workload.Id, workload.Name, role.Name,
             string.Join(", ", grantedResources), job.CorrelationId);
+
+        return $"Guest {guest.DisplayName} ({guest.EntraObjectId}) erhielt Rolle '{role.Name}' auf Workload " +
+            $"'{workload.Name}': {grantedResources.Count} Ressource(n) gewaehrt [{string.Join(", ", grantedResources)}]" +
+            (skippedResources.Count > 0 ? $", {skippedResources.Count} ohne ExternalId uebersprungen." : ".");
     }
 }
 
@@ -103,7 +110,7 @@ public sealed class RevokeWorkloadRoleHandler(
 {
     public string JobType => JobTypes.RevokeWorkloadRole;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var assignmentId = Guid.Parse(job.EntityId);
         var tenant = TenantContext.Create(job.PlatformTenantId, job.DirectoryTenantId);
@@ -114,13 +121,13 @@ public sealed class RevokeWorkloadRoleHandler(
         if (guestId == Guid.Empty)
         {
             logger.LogWarning("RevokeWorkloadRole: GuestId fehlt für {AssignmentId}.", assignmentId);
-            return;
+            return $"Assignment {assignmentId}: GuestId fehlt — kein Revoke ausgefuehrt.";
         }
         var guest = await guestRepository.GetAsync(tenant, guestId, ct);
         if (assignment is null || guest?.EntraObjectId is null)
         {
             logger.LogWarning("RevokeWorkloadRole: Assignment oder Guest fehlt für {AssignmentId}.", assignmentId);
-            return;
+            return $"Assignment {assignmentId}: Assignment oder Guest/EntraObjectId fehlt — kein Revoke ausgefuehrt.";
         }
 
         var workload = await workloadRepository.GetAsync(tenant, assignment.WorkloadId, ct);
@@ -128,12 +135,13 @@ public sealed class RevokeWorkloadRoleHandler(
         if (workload is null || role is null)
         {
             logger.LogWarning("RevokeWorkloadRole: Workload oder Rolle fehlt für {AssignmentId}.", assignmentId);
-            return;
+            return $"Assignment {assignmentId}: Workload oder Rolle fehlt — kein Revoke ausgefuehrt.";
         }
 
         // Entfernt ausschließlich die Member-Referenz des Workload-Zugriffs — die
         // Gastidentität selbst wird hier nie berührt (Anhang A, Regel 3).
         var revokedResources = new List<string>();
+        var skippedResources = new List<string>();
         foreach (var resourceId in role.ResourceMappings)
         {
             var resource = workload.Resources.FirstOrDefault(r => r.Id == resourceId);
@@ -143,6 +151,7 @@ public sealed class RevokeWorkloadRoleHandler(
                     "RevokeWorkloadRole: Assignment {AssignmentId} — Ressource {ResourceId} in Rolle {RoleName} " +
                     "hat keine ExternalId, wird uebersprungen.",
                     assignmentId, resourceId, role.Name);
+                skippedResources.Add(resourceId.ToString());
                 continue;
             }
 
@@ -165,5 +174,9 @@ public sealed class RevokeWorkloadRoleHandler(
             "({WorkloadName}) Rolle={RoleName} Ressourcen=[{Resources}] CorrelationId={CorrelationId}",
             assignmentId, guest.Id, workload.Id, workload.Name, role.Name,
             string.Join(", ", revokedResources), job.CorrelationId);
+
+        return $"Guest {guest.DisplayName} ({guest.EntraObjectId}) verlor Rolle '{role.Name}' auf Workload " +
+            $"'{workload.Name}': {revokedResources.Count} Ressource(n) entzogen [{string.Join(", ", revokedResources)}]" +
+            (skippedResources.Count > 0 ? $", {skippedResources.Count} ohne ExternalId uebersprungen." : ".");
     }
 }

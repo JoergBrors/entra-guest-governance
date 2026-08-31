@@ -45,10 +45,10 @@ public class CosmosJobDispatcherTests
         public string JobType => "CosmosTestJobType";
         public int CallCount { get; private set; }
 
-        public Task HandleAsync(JobEnvelope job, CancellationToken cancellationToken)
+        public Task<string?> HandleAsync(JobEnvelope job, CancellationToken cancellationToken)
         {
             CallCount++;
-            return Task.CompletedTask;
+            return Task.FromResult<string?>(null);
         }
     }
 
@@ -125,7 +125,7 @@ public class CosmosJobDispatcherTests
     private sealed class ThrowingHandler : IJobHandler
     {
         public string JobType => "CosmosAlwaysFails";
-        public Task HandleAsync(JobEnvelope job, CancellationToken cancellationToken) =>
+        public Task<string?> HandleAsync(JobEnvelope job, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("boom");
     }
 

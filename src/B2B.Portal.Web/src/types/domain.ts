@@ -94,6 +94,20 @@ export interface JobStatusResponse {
   log: JobLogEntryResponse[];
 }
 
+export interface WorkerControlState {
+  workerName: string;
+  isPaused: boolean;
+  pausedBy?: string | null;
+  pausedAt?: string | null;
+  lastRunStartedAt?: string | null;
+  lastRunCompletedAt?: string | null;
+  lastRunSucceeded?: boolean | null;
+  lastRunSummary?: string | null;
+  lastTriggeredBy?: string | null;
+  triggerRequestedAt?: string | null;
+  triggerRequestedBy?: string | null;
+}
+
 export interface WorkloadMutationResponse {
   workload: Workload;
   patternSyncJobId?: string | null;

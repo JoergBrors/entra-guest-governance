@@ -20,7 +20,7 @@ public sealed class StartReviewHandler(
 {
     public string JobType => JobTypes.StartReview;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var reviewDefinitionId = job.Payload.GetProperty("ReviewDefinitionId").GetGuid();
         var guestId = job.Payload.GetProperty("GuestId").GetGuid();
@@ -49,6 +49,9 @@ public sealed class StartReviewHandler(
         logger.LogInformation(
             "Review {ReviewInstanceId} gestartet mit {ItemCount} Items. CorrelationId={CorrelationId}",
             instance.Id, instance.Items.Count, job.CorrelationId);
+
+        return $"Review {instance.Id} gestartet fuer ReviewDefinition {reviewDefinitionId}, Guest {guestId}: " +
+            $"{instance.Items.Count} Assignment(s) als Items aufgenommen.";
     }
 }
 
@@ -66,7 +69,7 @@ public sealed class ApplyReviewDecisionHandler(
 {
     public string JobType => JobTypes.ApplyReviewDecision;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var reviewInstanceId = Guid.Parse(job.EntityId);
         var reviewItemId = job.Payload.GetProperty("ReviewItemId").GetGuid();
@@ -78,7 +81,7 @@ public sealed class ApplyReviewDecisionHandler(
         if (instance is null || item is null)
         {
             logger.LogWarning("ApplyReviewDecision: ReviewItem {ReviewItemId} nicht gefunden.", reviewItemId);
-            return;
+            return $"ReviewItem {reviewItemId} in ReviewInstance {reviewInstanceId} nicht gefunden — keine Entscheidung angewendet.";
         }
 
         item.Decision = decision;
@@ -122,5 +125,8 @@ public sealed class ApplyReviewDecisionHandler(
         logger.LogInformation(
             "ReviewItem {ReviewItemId} entschieden: {Decision}. CorrelationId={CorrelationId}",
             reviewItemId, decision, job.CorrelationId);
+
+        return $"ReviewItem {reviewItemId} (Assignment {item.AssignmentId}) entschieden: {decision} von {item.DecidedBy}" +
+            (decision == ReviewDecision.Remove ? " — RevokeWorkloadRole-Job eingereiht." : ".");
     }
 }

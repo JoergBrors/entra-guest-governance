@@ -1414,6 +1414,107 @@ if (mode == "LOCAL_MOCK")
         return Results.Ok(store.ListUsers());
     });
 
+    // Worker-Steuerung (Erweiterung 2026-08-31 "Job/Worker-Audit — Worker-Steuerung"): die
+    // periodischen BackgroundServices (B2B.Portal.Worker) laufen unabhaengig vom API-Prozess;
+    // diese Endpoints lesen/schreiben ausschliesslich das persistierte WorkerControlState-
+    // Dokument (Container "jobs", siehe CosmosWorkerControlRepository) — der eigentliche
+    // Worker-Prozess liest denselben Zustand ueber PeriodicWorkerBase (Pause-Check vor jedem
+    // Tick, Trigger-Poll alle 5s). KnownWorkerNames haelt die feste Liste aller periodischen
+    // Worker, damit auch ein Worker ohne bisherigen Lauf (noch kein Cosmos-Dokument) in der
+    // Liste erscheint, statt schlicht zu fehlen.
+    // Namen als String-Literale statt nameof(...): B2B.Portal.Api referenziert B2B.Portal.Worker
+    // bewusst nicht (Composition-Root-Trennung, siehe AddB2BInfrastructure-Kommentar) — die
+    // Namen MUESSEN exakt mit den Klassennamen der BackgroundServices in B2B.Portal.Worker
+    // uebereinstimmen, da PeriodicWorkerBase dort nameof(<Klasse>) als WorkerName verwendet.
+    var knownWorkerNames = new[]
+    {
+        "ApplicationSignInSyncWorker", "InvitationReminderWorker",
+        "WorkloadPatternSyncWorker", "DiscoveryReconciliationWorker",
+    };
+
+    app.MapGet("/api/dev/workers", async (
+        IWorkerControlRepository workerControlRepo, IPortalUserContextAccessor userCtx, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+
+        var known = await workerControlRepo.ListAllAsync(ct);
+        var knownByName = known.ToDictionary(s => s.WorkerName, StringComparer.Ordinal);
+        var result = knownWorkerNames.Select(name =>
+            knownByName.TryGetValue(name, out var state)
+                ? state
+                : new WorkerControlState(name, false, null, null, null, null, null, null, null));
+        return Results.Ok(result);
+    });
+
+    app.MapPost("/api/dev/workers/{workerName}/pause", async (
+        string workerName, IWorkerControlRepository workerControlRepo, IPortalUserContextAccessor userCtx, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+        if (!knownWorkerNames.Contains(workerName, StringComparer.Ordinal))
+        {
+            return Results.NotFound(new { error = $"Unbekannter Worker '{workerName}'." });
+        }
+
+        var existing = await workerControlRepo.GetAsync(workerName, ct)
+            ?? new WorkerControlState(workerName, false, null, null, null, null, null, null, null);
+        var updated = existing with { IsPaused = true, PausedBy = userCtx.Current.Mail, PausedAt = DateTimeOffset.UtcNow };
+        await workerControlRepo.UpsertAsync(updated, ct);
+        return Results.Ok(updated);
+    });
+
+    app.MapPost("/api/dev/workers/{workerName}/resume", async (
+        string workerName, IWorkerControlRepository workerControlRepo, IPortalUserContextAccessor userCtx, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+        if (!knownWorkerNames.Contains(workerName, StringComparer.Ordinal))
+        {
+            return Results.NotFound(new { error = $"Unbekannter Worker '{workerName}'." });
+        }
+
+        var existing = await workerControlRepo.GetAsync(workerName, ct)
+            ?? new WorkerControlState(workerName, false, null, null, null, null, null, null, null);
+        var updated = existing with { IsPaused = false, PausedBy = null, PausedAt = null };
+        await workerControlRepo.UpsertAsync(updated, ct);
+        return Results.Ok(updated);
+    });
+
+    app.MapPost("/api/dev/workers/{workerName}/trigger", async (
+        string workerName, IWorkerControlRepository workerControlRepo, IPortalUserContextAccessor userCtx, CancellationToken ct) =>
+    {
+        if (!userCtx.Current.IsGovernanceAdmin)
+        {
+            return Results.StatusCode(403);
+        }
+        if (!knownWorkerNames.Contains(workerName, StringComparer.Ordinal))
+        {
+            return Results.NotFound(new { error = $"Unbekannter Worker '{workerName}'." });
+        }
+
+        var existing = await workerControlRepo.GetAsync(workerName, ct)
+            ?? new WorkerControlState(workerName, false, null, null, null, null, null, null, null);
+        if (existing.IsPaused)
+        {
+            return Results.Conflict(new { error = $"Worker '{workerName}' ist pausiert — erst fortsetzen (resume), dann triggern." });
+        }
+
+        var updated = existing with { TriggerRequestedAt = DateTimeOffset.UtcNow, TriggerRequestedBy = userCtx.Current.Mail };
+        await workerControlRepo.UpsertAsync(updated, ct);
+        return Results.Accepted(value: new
+        {
+            message = $"Trigger fuer '{workerName}' angefordert — wird innerhalb weniger Sekunden vom Worker-Prozess abgeholt.",
+            state = updated,
+        });
+    });
+
     // Manueller Trigger fuer den periodischen Discovery-Abgleich (Erweiterung 2026-08-31
     // "EntraId-Persistenz + Discovery-Reconciliation"): DiscoveryReconciliationWorker
     // (B2B.Portal.Worker) laeuft alle 10 Minuten automatisch im Worker-Prozess und ist von

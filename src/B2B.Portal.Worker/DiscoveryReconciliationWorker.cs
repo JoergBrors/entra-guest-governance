@@ -16,8 +16,8 @@ namespace B2B.Portal.Worker;
 /// Datenproblem, kein Timing-Artefakt mehr, das automatisch geheilt werden sollte).
 ///
 /// Modelliert exakt nach ApplicationSignInSyncWorker/InvitationReminderWorker/
-/// WorkloadPatternSyncWorker (BackgroundService + PeriodicTimer, gleiches 10-Minuten-
-/// Intervall, gleicher Multi-Tenant-Scan ueber MockEntraDirectoryStore.ListKnownPlatformTenantIds).
+/// WorkloadPatternSyncWorker (PeriodicWorkerBase, gleiches 10-Minuten-Intervall, gleicher
+/// Multi-Tenant-Scan ueber MockEntraDirectoryStore.ListKnownPlatformTenantIds).
 /// Zusaetzlich manuell ausloesbar ueber POST /api/dev/discovery/reconcile (B2B.Portal.Api),
 /// da dieser BackgroundService selbst nur im B2B.Portal.Worker-Prozess laeuft und von dort
 /// nicht direkt per HTTP erreichbar ist.
@@ -26,20 +26,11 @@ public sealed class DiscoveryReconciliationWorker(
     IConfiguration configuration,
     IWorkloadRepository workloadRepository,
     MockEntraDirectoryStore mockEntraStore,
-    ILogger<DiscoveryReconciliationWorker> logger) : BackgroundService
+    IWorkerControlRepository workerControlRepository,
+    ILogger<DiscoveryReconciliationWorker> logger)
+    : PeriodicWorkerBase(nameof(DiscoveryReconciliationWorker), TimeSpan.FromMinutes(10), workerControlRepository, logger)
 {
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        var interval = TimeSpan.FromMinutes(10);
-        await ReconcileAsync(stoppingToken);
-        using var timer = new PeriodicTimer(interval);
-        while (await timer.WaitForNextTickAsync(stoppingToken))
-        {
-            await ReconcileAsync(stoppingToken);
-        }
-    }
-
-    private async Task ReconcileAsync(CancellationToken ct)
+    protected override async Task<string?> RunOnceAsync(CancellationToken ct)
     {
         var tenantIds = mockEntraStore.ListKnownPlatformTenantIds();
         if (tenantIds.Count == 0)
@@ -47,25 +38,18 @@ public sealed class DiscoveryReconciliationWorker(
             tenantIds = [configuration["VITE_DEV_PLATFORM_TENANT_ID"] ?? "dev-tenant-a"];
         }
 
+        var summaries = new List<string>();
         foreach (var tenantId in tenantIds)
         {
-            try
-            {
-                var missingCount = await mockEntraStore.ReconcileWorkloadResourcesAsync(
-                    TenantContext.Create(tenantId), workloadRepository, logger, ct);
+            var missingCount = await mockEntraStore.ReconcileWorkloadResourcesAsync(
+                TenantContext.Create(tenantId), workloadRepository, logger, ct);
 
-                logger.LogInformation(
-                    "DiscoveryReconciliationWorker: Tenant {Tenant} abgeglichen, {MissingCount} Workload-Ressource(n) " +
-                    "ohne bekannte Verzeichnis-Gruppe.",
-                    tenantId, missingCount);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "DiscoveryReconciliationWorker konnte Tenant {Tenant} nicht abgleichen.", tenantId);
-            }
+            logger.LogInformation(
+                "DiscoveryReconciliationWorker: Tenant {Tenant} abgeglichen, {MissingCount} Workload-Ressource(n) " +
+                "ohne bekannte Verzeichnis-Gruppe.",
+                tenantId, missingCount);
+            summaries.Add($"Tenant {tenantId}: {missingCount} Workload-Ressource(n) ohne bekannte Verzeichnis-Gruppe.");
         }
+        return string.Join(" | ", summaries);
     }
 }

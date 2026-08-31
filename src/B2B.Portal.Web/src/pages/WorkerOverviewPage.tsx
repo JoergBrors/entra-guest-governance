@@ -1,11 +1,21 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Badge, Button, Card, MessageBar, MessageBarBody, Spinner, Text, Title2,
+  Badge, Button, Card, MessageBar, MessageBarBody, Spinner, Text, Title2, Title3,
   makeStyles, tokens,
 } from '@fluentui/react-components';
 import { api } from '../api/client';
-import type { JobStatusResponse } from '../types/domain';
+import type { JobStatusResponse, WorkerControlState } from '../types/domain';
+
+// Erklaert je periodischem Worker, WAS er tut und wie oft — ergaenzt die reine
+// Job-Typ-Statistik oben um die tatsaechlichen BackgroundServices (B2B.Portal.Worker), die
+// im Hintergrund selbststaendig Jobs einreihen bzw. den Mock-Entra-Bestand abgleichen.
+const WORKER_DESCRIPTIONS: Record<string, string> = {
+  ApplicationSignInSyncWorker: 'Synchronisiert Mock-Entra-App-Anmeldungen fuer aktive Assignments (alle 10 Min).',
+  InvitationReminderWorker: 'Scannt offene Einladungen und reiht faellige Reminder-Jobs ein (alle 10 Min).',
+  WorkloadPatternSyncWorker: 'Gleicht Workload-Gruppen-Pattern gegen das Mock-Entra-Verzeichnis ab (alle 10 Min).',
+  DiscoveryReconciliationWorker: 'Prueft, ob alle von Workloads referenzierten Gruppen im Verzeichnis noch existieren (alle 10 Min).',
+};
 
 const useStyles = makeStyles({
   list: { display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '16px' },
@@ -15,6 +25,13 @@ const useStyles = makeStyles({
     gridTemplateColumns: 'minmax(200px, 1.2fr) repeat(3, minmax(90px, auto)) minmax(160px, auto) auto',
     gap: '12px',
     alignItems: 'center',
+  },
+  workerRow: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(220px, 1fr) minmax(140px, auto) minmax(80px, auto) minmax(120px, auto)',
+    gridTemplateAreas: '"name lastrun result triggeredby" "summary summary summary summary" "actions actions actions actions"',
+    gap: '8px 12px',
+    alignItems: 'start',
   },
   stat: { display: 'flex', flexDirection: 'column', gap: '2px' },
   statCount: { fontSize: tokens.fontSizeBase500 },
@@ -96,13 +113,18 @@ export function WorkerOverviewPage() {
   const styles = useStyles();
   const navigate = useNavigate();
   const [jobs, setJobs] = useState<JobStatusResponse[] | null>(null);
+  const [workers, setWorkers] = useState<WorkerControlState[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [triggering, setTriggering] = useState<string | null>(null);
+  const [workerActionPending, setWorkerActionPending] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
   const reload = () => {
     api.listJobs()
       .then(setJobs)
+      .catch((e: Error) => setError(e.message));
+    api.listWorkers()
+      .then(setWorkers)
       .catch((e: Error) => setError(e.message));
   };
 
@@ -111,6 +133,47 @@ export function WorkerOverviewPage() {
     const interval = setInterval(reload, AUTO_REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
   }, []);
+
+  const handlePauseWorker = async (workerName: string) => {
+    setError(null);
+    setWorkerActionPending(workerName);
+    try {
+      await api.pauseWorker(workerName);
+      reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setWorkerActionPending(null);
+    }
+  };
+
+  const handleResumeWorker = async (workerName: string) => {
+    setError(null);
+    setWorkerActionPending(workerName);
+    try {
+      await api.resumeWorker(workerName);
+      reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setWorkerActionPending(null);
+    }
+  };
+
+  const handleTriggerWorker = async (workerName: string) => {
+    setError(null);
+    setInfo(null);
+    setWorkerActionPending(workerName);
+    try {
+      const result = await api.triggerWorker(workerName);
+      setInfo(result.message);
+      reload();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setWorkerActionPending(null);
+    }
+  };
 
   const runDiscovery = async () => {
     setError(null);
@@ -172,6 +235,86 @@ export function WorkerOverviewPage() {
         </MessageBar>
       )}
 
+      <Title3 style={{ marginTop: 24, display: 'block' }}>Periodische Worker</Title3>
+      <Text size={200} className={styles.meta}>
+        Hintergrundprozesse in B2B.Portal.Worker, die selbststaendig alle 10 Minuten laufen —
+        pausierbar/fortsetzbar (uebersteht einen Neustart) und manuell sofort auslösbar.
+      </Text>
+      <div className={styles.list}>
+        {!workers && <Spinner size="tiny" label="Lade Worker-Status…" />}
+        {workers?.map((worker) => (
+          <Card key={worker.workerName} className={styles.card}>
+            <div className={styles.workerRow}>
+              <div style={{ gridArea: 'name' }}>
+                <Text weight="semibold" block>
+                  {worker.workerName}{' '}
+                  {worker.isPaused && (
+                    <Badge appearance="tint" color="warning" style={{ marginLeft: 4 }}>Pausiert</Badge>
+                  )}
+                </Text>
+                <Text size={200} className={styles.meta}>
+                  {WORKER_DESCRIPTIONS[worker.workerName] ?? ''}
+                </Text>
+                {worker.isPaused && worker.pausedBy && (
+                  <Text size={200} className={styles.meta} block>
+                    Pausiert von {worker.pausedBy} am {worker.pausedAt ? new Date(worker.pausedAt).toLocaleString() : ''}
+                  </Text>
+                )}
+              </div>
+              <div className={styles.stat} style={{ gridArea: 'lastrun' }}>
+                <Text size={200} className={styles.meta}>Letzter Lauf</Text>
+                <Text size={200}>
+                  {worker.lastRunCompletedAt ? new Date(worker.lastRunCompletedAt).toLocaleString() : 'Noch nie gelaufen'}
+                </Text>
+              </div>
+              <div className={styles.stat} style={{ gridArea: 'result' }}>
+                <Text size={200} className={styles.meta}>Ergebnis</Text>
+                {worker.lastRunSucceeded === true && <Badge appearance="tint" color="success">OK</Badge>}
+                {worker.lastRunSucceeded === false && <Badge appearance="tint" color="danger">Fehler</Badge>}
+                {worker.lastRunSucceeded == null && <Text size={200}>—</Text>}
+              </div>
+              <div className={styles.stat} style={{ gridArea: 'triggeredby' }}>
+                <Text size={200} className={styles.meta}>Ausgeloest von</Text>
+                <Text size={200}>{worker.lastTriggeredBy ?? '—'}</Text>
+              </div>
+              <div className={styles.stat} style={{ gridArea: 'summary' }}>
+                <Text size={200} className={styles.meta}>Was wurde getan</Text>
+                <Text size={200}>{worker.lastRunSummary ?? '—'}</Text>
+              </div>
+              <div className={styles.actions} style={{ gridArea: 'actions' }}>
+                <Button
+                  size="small"
+                  disabled={workerActionPending === worker.workerName}
+                  onClick={() => handleTriggerWorker(worker.workerName)}
+                >
+                  Jetzt ausführen
+                </Button>
+                {worker.isPaused ? (
+                  <Button
+                    size="small"
+                    appearance="primary"
+                    disabled={workerActionPending === worker.workerName}
+                    onClick={() => handleResumeWorker(worker.workerName)}
+                  >
+                    Fortsetzen
+                  </Button>
+                ) : (
+                  <Button
+                    size="small"
+                    appearance="secondary"
+                    disabled={workerActionPending === worker.workerName}
+                    onClick={() => handlePauseWorker(worker.workerName)}
+                  >
+                    Pausieren
+                  </Button>
+                )}
+              </div>
+            </div>
+          </Card>
+        ))}
+      </div>
+
+      <Title3 style={{ marginTop: 24, display: 'block' }}>Job-Typen</Title3>
       <div className={styles.list}>
         {summaries.length === 0 && (
           <Card className={styles.card}>

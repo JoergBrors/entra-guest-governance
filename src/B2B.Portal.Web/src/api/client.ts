@@ -10,6 +10,7 @@ import type {
   WorkloadMutationResponse,
   GuestAccountState,
   ReminderPolicy, ReminderStage, ReminderStagePreview, MailSinkEntry,
+  WorkerControlState,
 } from '../types/domain';
 import { getToken } from '../auth/token';
 
@@ -55,11 +56,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(message);
   }
 
-  if (response.status === 202 || response.status === 204 || response.headers.get('content-length') === '0') {
+  // 204 hat per HTTP-Spezifikation nie einen Body. 202 KANN einen Body haben (z.B. dieser
+  // Trigger-Endpoint liefert { message, state } zurueck) — vorher wurde hier pauschal
+  // undefined zurueckgegeben, was bei jedem 202-Response MIT Body zu "Cannot read properties
+  // of undefined" beim Aufrufer fuehrte (siehe WorkerOverviewPage.handleTriggerWorker).
+  // content-length fehlt bei manchen Antworten (z.B. chunked/ohne expliziten Header), daher
+  // zusaetzlich versuchen zu parsen und nur bei leerem Body wirklich undefined liefern.
+  if (response.status === 204) {
     return undefined as T;
   }
 
-  return (await response.json()) as T;
+  const text = await response.text();
+  if (!text) {
+    return undefined as T;
+  }
+  return JSON.parse(text) as T;
 }
 
 /** Wie request(), aber ohne Content-Type-Header — der Browser setzt bei FormData die
@@ -113,6 +124,13 @@ export const api = {
   triggerDiscovery: () => request<JobStatusResponse>('/api/jobs/trigger/discovery', { method: 'POST' }),
   triggerReconciliation: () =>
     request<{ queuedJobCount: number; jobIds: string[] }>('/api/jobs/trigger/reconciliation', { method: 'POST' }),
+  listWorkers: () => request<WorkerControlState[]>('/api/dev/workers'),
+  pauseWorker: (workerName: string) =>
+    request<WorkerControlState>(`/api/dev/workers/${encodeURIComponent(workerName)}/pause`, { method: 'POST' }),
+  resumeWorker: (workerName: string) =>
+    request<WorkerControlState>(`/api/dev/workers/${encodeURIComponent(workerName)}/resume`, { method: 'POST' }),
+  triggerWorker: (workerName: string) =>
+    request<{ message: string; state: WorkerControlState }>(`/api/dev/workers/${encodeURIComponent(workerName)}/trigger`, { method: 'POST' }),
   uiConfiguration: () => request<UiConfiguration>('/api/ui/configuration'),
   myNavigation: () => request<{ items: string[] }>('/api/me/navigation'),
   mockLogin: (mail: string) =>

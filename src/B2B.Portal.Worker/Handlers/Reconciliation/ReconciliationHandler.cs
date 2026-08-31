@@ -18,7 +18,7 @@ public sealed class ReconciliationHandler(
 {
     public string JobType => JobTypes.RunReconciliation;
 
-    public async Task HandleAsync(JobEnvelope job, CancellationToken ct)
+    public async Task<string?> HandleAsync(JobEnvelope job, CancellationToken ct)
     {
         var guestId = job.Payload.GetProperty("GuestId").GetGuid();
 
@@ -30,5 +30,7 @@ public sealed class ReconciliationHandler(
             "Reconciliation Guest={GuestId}: DesiredAssignments={Desired} ActualAccess={Actual} " +
             "CorrelationId={CorrelationId}",
             guestId, desired.Count, actual.Count, job.CorrelationId);
+
+        return $"Guest {guestId}: {desired.Count} Desired-Assignment(s) vs. {actual.Count} Actual-Access-Eintrag(e).";
     }
 }

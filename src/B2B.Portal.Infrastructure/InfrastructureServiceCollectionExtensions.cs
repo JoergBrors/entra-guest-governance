@@ -72,6 +72,7 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<IMockEntraDirectoryRepository, CosmosMockEntraDirectoryRepository>();
         services.AddSingleton<IReminderPolicyRepository, CosmosReminderPolicyRepository>();
         services.AddSingleton<IMailSinkRepository, CosmosMailSinkRepository>();
+        services.AddSingleton<IWorkerControlRepository, CosmosWorkerControlRepository>();
 
         // Nimmt IMockEntraUserRepository als optionale Abhaengigkeit (siehe MockGuestDirectory.cs)
         // fuer Persistenz von PortalRoles und Startup-Hydration (Program.cs ruft
