@@ -36,6 +36,39 @@ public sealed class CosmosResourceAccessRepository(CosmosClientFactory factory) 
         return results;
     }
 
+    public async Task<IReadOnlyList<ResourceAccess>> ListUnclassifiedByTenantAsync(TenantContext tenant, CancellationToken ct)
+    {
+        var query = Container.GetItemQueryIterator<ResourceAccessDocument>(
+            new QueryDefinition(
+                "SELECT * FROM c WHERE c.platformTenantId = @tenant AND c.entityType = @type AND c.classification = @classification")
+                .WithParameter("@tenant", tenant.PlatformTenantId)
+                .WithParameter("@type", EntityType)
+                .WithParameter("@classification", nameof(AccessClassification.Unclassified)),
+            requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey(tenant.PlatformTenantId) });
+
+        var results = new List<ResourceAccess>();
+        while (query.HasMoreResults)
+        {
+            var page = await query.ReadNextAsync(ct);
+            results.AddRange(page.Select(d => d.ToEntity()));
+        }
+        return results;
+    }
+
+    public async Task<ResourceAccess?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct)
+    {
+        try
+        {
+            var response = await Container.ReadItemAsync<ResourceAccessDocument>(
+                id.ToString(), new PartitionKey(tenant.PlatformTenantId), cancellationToken: ct);
+            return response.Resource.ToEntity();
+        }
+        catch (CosmosException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
     public Task UpsertAsync(ResourceAccess access, CancellationToken ct) =>
         Container.UpsertItemAsync(
             ResourceAccessDocument.FromEntity(access),

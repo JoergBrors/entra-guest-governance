@@ -172,6 +172,17 @@ public sealed class MockEntraDirectoryStore
         }
     }
 
+    /// <summary>Alle Entra-Object-IDs, die tatsaechlich Mitglied der gegebenen Gruppe sind
+    /// (Kehrseite von ListMemberships, das pro Gast abfragt) — Erweiterung 2026-08-31
+    /// "Ist-Mitgliederzahl je Workload-Ressource".</summary>
+    public IReadOnlyList<string> ListMembersOfGroup(string groupId)
+    {
+        lock (_gate)
+        {
+            return _membersByGroupId.TryGetValue(groupId, out var members) ? [.. members] : [];
+        }
+    }
+
     public IReadOnlyList<DirectoryGroupMembership> ListMemberships(string entraObjectId)
     {
         lock (_gate)
@@ -810,6 +821,10 @@ public sealed class MockGuestDirectory(MockEntraDirectoryStore store) : IGuestDi
     public Task<IReadOnlyList<DirectoryGroupMembership>> ListMembershipsAsync(
         string directoryTenantId, string entraObjectId, CancellationToken ct)
         => Task.FromResult(store.ListMemberships(entraObjectId));
+
+    public Task<IReadOnlyList<string>> ListGroupMemberObjectIdsAsync(
+        string directoryTenantId, string groupExternalId, CancellationToken ct)
+        => Task.FromResult(store.ListMembersOfGroup(groupExternalId));
 
     public Task<string> InviteGuestAsync(
         string directoryTenantId, string mail, string displayName, CancellationToken ct)

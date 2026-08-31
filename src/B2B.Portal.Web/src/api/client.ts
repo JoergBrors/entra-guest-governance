@@ -280,6 +280,7 @@ export const api = {
     request<void>(`/api/workloads/${workloadId}/resources/${resourceId}`, { method: 'DELETE' }),
 
   listOpenReviews: () => request<ReviewInstance[]>('/api/reviews'),
+  triggerDiscoveryReview: () => request<JobStatusResponse>('/api/reviews/trigger/discovery', { method: 'POST' }),
   decideReviewItem: (reviewInstanceId: string, reviewItemId: string, decision: 'Keep' | 'Remove' | 'Escalated') =>
     request<void>(`/api/reviews/${reviewInstanceId}/items/${reviewItemId}/decision`, {
       method: 'POST',

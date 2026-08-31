@@ -7,7 +7,19 @@ using B2B.Portal.Domain.ValueObjects;
 
 namespace B2B.Portal.Application.Workloads;
 
-public sealed record WorkloadAssignmentCounts(int Active, int Inactive);
+/// <summary>
+/// Active/Inactive zaehlen ausschliesslich formale GuestWorkloadAssignments (Desired State) —
+/// unveraendert gegenueber der urspruenglichen Definition, u.a. weil Active&gt;0 die
+/// Hart-Loeschen-Sperre triggert (siehe WorkloadManagementService.DeleteWorkloadAsync).
+/// DirectoryMemberCount ist eine rein informative Ergaenzung (Erweiterung 2026-08-31 "Ist-
+/// Mitgliederzahl je Workload-Ressource"): Anzahl eindeutiger Entra-Objekte, die tatsaechlich
+/// Mitglied irgendeiner Gruppen-/Team-Ressource dieses Workload im Mock-Entra-Verzeichnis
+/// sind — kann von Active+Inactive abweichen (z.B. wenn jemand ausserhalb des Portal-Workflows
+/// direkt der Gruppe hinzugefuegt wurde, siehe Discovery-Review fuer die governance-konforme
+/// Aufloesung dieser Diskrepanz). Null, wenn kein IGuestDirectory verfuegbar ist (z.B. in
+/// aelteren Tests, die WorkloadManagementService ohne diese Dependency konstruieren).
+/// </summary>
+public sealed record WorkloadAssignmentCounts(int Active, int Inactive, int? DirectoryMemberCount = null);
 
 /// <summary>
 /// Bündelt alle schreibenden Operationen auf Workload/WorkloadRole/WorkloadResource
@@ -22,7 +34,8 @@ public sealed class WorkloadManagementService(
     IWorkloadRepository workloadRepository,
     IWorkloadScenarioRepository scenarioRepository,
     IAssignmentRepository assignmentRepository,
-    AuditService auditService)
+    AuditService auditService,
+    IGuestDirectory? guestDirectory = null)
 {
     public async Task<Workload> CreateWorkloadAsync(
         TenantContext tenant, string name, string? owner, string? templateId,
@@ -112,13 +125,43 @@ public sealed class WorkloadManagementService(
     }
 
     /// <summary>Aktive vs. inaktive/beendete Zuweisungen eines Workload — Grundlage für die
-    /// "Wie viele Nutzer hat dieser Workload noch?"-Anzeige und die Hart-Löschen-Sperre.</summary>
+    /// "Wie viele Nutzer hat dieser Workload noch?"-Anzeige und die Hart-Löschen-Sperre.
+    /// Ergaenzt um DirectoryMemberCount (siehe WorkloadAssignmentCounts-Kommentar).</summary>
     public async Task<WorkloadAssignmentCounts> GetAssignmentCountsAsync(
         TenantContext tenant, Guid workloadId, CancellationToken ct)
     {
         var assignments = await assignmentRepository.ListByWorkloadAsync(tenant, workloadId, ct);
         var active = assignments.Count(a => a.Status is AssignmentStatus.Active or AssignmentStatus.Approved or AssignmentStatus.Requested);
-        return new WorkloadAssignmentCounts(active, assignments.Count - active);
+
+        int? directoryMemberCount = null;
+        if (guestDirectory is not null)
+        {
+            var workload = await workloadRepository.GetAsync(tenant, workloadId, ct);
+            var groupResources = workload?.Resources
+                .Where(r => IsMockEntraGroupResource(r) && !string.IsNullOrWhiteSpace(r.ExternalId))
+                .ToList() ?? [];
+
+            if (groupResources.Count > 0)
+            {
+                var members = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var resource in groupResources)
+                {
+                    var groupMembers = await guestDirectory.ListGroupMemberObjectIdsAsync(
+                        tenant.DirectoryTenantId ?? string.Empty, resource.ExternalId!, ct);
+                    foreach (var memberId in groupMembers)
+                    {
+                        members.Add(memberId);
+                    }
+                }
+                directoryMemberCount = members.Count;
+            }
+            else
+            {
+                directoryMemberCount = 0;
+            }
+        }
+
+        return new WorkloadAssignmentCounts(active, assignments.Count - active, directoryMemberCount);
     }
 
     /// <summary>Hartes Löschen — nur erlaubt, wenn keine aktiven Zuweisungen mehr existieren
@@ -257,6 +300,7 @@ public sealed class WorkloadManagementService(
             ?? throw new InvalidOperationException($"Workload {workloadId} nicht gefunden.");
 
         var resource = resourceId is null ? null : workload.Resources.FirstOrDefault(r => r.Id == resourceId);
+        var isNewResource = resource is null;
         if (resource is null)
         {
             resource = new WorkloadResource
@@ -273,6 +317,11 @@ public sealed class WorkloadManagementService(
             resource.DisplayName = displayName ?? resource.DisplayName;
         }
 
+        if (isNewResource)
+        {
+            EnsureDefaultRoleForGroupResource(workload, resource);
+        }
+
         workload.UpdatedAt = DateTimeOffset.UtcNow;
         await workloadRepository.UpsertAsync(workload, ct);
 
@@ -282,6 +331,54 @@ public sealed class WorkloadManagementService(
 
         return resource;
     }
+
+    /// <summary>
+    /// Legt automatisch eine Standard-Rolle an, wenn ein Workload OHNE Application (kein
+    /// ApplicationExternalId, also nie App-Rollen relevant) eine erste Gruppen-Ressource
+    /// bekommt und noch keine einzige WorkloadRole hat (Erweiterung 2026-08-31 "Default-Rolle
+    /// fuer reine Gruppen-Workloads"). Vorher musste ein Admin bei jedem Gruppen-Workload
+    /// manuell eine Rolle im Freitext-Formular anlegen, bevor ueberhaupt ein Gast zugewiesen
+    /// werden konnte — bei einem Workload ohne Application (das WorkloadsAdminPage-
+    /// App-Rollen-Dropdown blendet sich dort gar nicht erst ein, siehe applicationExternalId-
+    /// Gate) ist eine 1:1-Rollenmodellierung pro Gruppe unnoetiger Mehraufwand, wenn "Mitglied
+    /// dieser Gruppe(n)" der einzig sinnvolle Zugriffstyp ist. Ein Workload MIT Application
+    /// bleibt unveraendert: dort bildet i.d.R. jede AppRole eine eigene WorkloadRole, das
+    /// automatische Anlegen wuerde dem widersprechen. Erweitert eine bereits bestehende
+    /// Default-Rolle um die neue Ressource, statt bei jeder weiteren Gruppe erneut eine neue
+    /// Rolle anzulegen — ein Admin kann die Rolle jederzeit umbenennen/anpassen, das
+    /// automatische Verhalten greift dann nicht mehr erneut (siehe "noch keine Rolle"-Check).
+    /// </summary>
+    private static void EnsureDefaultRoleForGroupResource(Workload workload, WorkloadResource resource)
+    {
+        if (!string.IsNullOrWhiteSpace(workload.ApplicationExternalId) || !IsMockEntraGroupResource(resource))
+        {
+            return;
+        }
+
+        var defaultRole = workload.Roles.FirstOrDefault(r => r.Name == DefaultRoleName);
+        if (defaultRole is null)
+        {
+            if (workload.Roles.Count > 0)
+            {
+                // Es existiert bereits mindestens eine (vermutlich manuell angelegte oder
+                // umbenannte) Rolle — kein automatisches Eingreifen mehr, um eine bewusste
+                // Rollenmodellierung des Admins nicht zu ueberschreiben.
+                return;
+            }
+
+            defaultRole = new WorkloadRole { WorkloadId = workload.Id, Name = DefaultRoleName };
+            workload.Roles.Add(defaultRole);
+        }
+
+        defaultRole.ResourceMappings.Add(resource.Id);
+    }
+
+    private const string DefaultRoleName = "Standardzugriff";
+
+    private static bool IsMockEntraGroupResource(WorkloadResource resource) =>
+        resource.ResourceType.Equals("SecurityGroup", StringComparison.OrdinalIgnoreCase)
+        || resource.ResourceType.Equals("M365Group", StringComparison.OrdinalIgnoreCase)
+        || resource.ResourceType.Equals("Team", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Haengt eine Ressource an einen Workload — externalId MUSS die stabile Entra-Object-ID
@@ -321,6 +418,7 @@ public sealed class WorkloadManagementService(
             Managed = false,
         };
         workload.Resources.Add(resource);
+        EnsureDefaultRoleForGroupResource(workload, resource);
         workload.UpdatedAt = DateTimeOffset.UtcNow;
         await workloadRepository.UpsertAsync(workload, ct);
 

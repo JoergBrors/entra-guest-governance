@@ -61,7 +61,10 @@ internal sealed class ReviewItemDocument
 {
     [JsonPropertyName("id")] public required Guid Id { get; init; }
     [JsonPropertyName("reviewInstanceId")] public required Guid ReviewInstanceId { get; init; }
-    [JsonPropertyName("assignmentId")] public required Guid AssignmentId { get; init; }
+    // Erweiterung 2026-08-31 "Discovery-Sichtbarkeit ueber Review": beide nullable, genau
+    // eines der beiden Felder ist gesetzt (siehe ReviewItem-Kommentar in der Domain-Entity).
+    [JsonPropertyName("assignmentId")] public Guid? AssignmentId { get; init; }
+    [JsonPropertyName("resourceAccessId")] public Guid? ResourceAccessId { get; init; }
     [JsonPropertyName("decision")] public required ReviewDecision Decision { get; init; }
     [JsonPropertyName("decidedBy")] public string? DecidedBy { get; init; }
     [JsonPropertyName("decidedAt")] public DateTimeOffset? DecidedAt { get; init; }
@@ -70,12 +73,14 @@ internal sealed class ReviewItemDocument
     public static ReviewItemDocument FromEntity(ReviewItem i) => new()
     {
         Id = i.Id, ReviewInstanceId = i.ReviewInstanceId, AssignmentId = i.AssignmentId,
+        ResourceAccessId = i.ResourceAccessId,
         Decision = i.Decision, DecidedBy = i.DecidedBy, DecidedAt = i.DecidedAt, Reason = i.Reason,
     };
 
     public ReviewItem ToEntity() => new()
     {
         Id = Id, ReviewInstanceId = ReviewInstanceId, AssignmentId = AssignmentId,
+        ResourceAccessId = ResourceAccessId,
         Decision = Decision, DecidedBy = DecidedBy, DecidedAt = DecidedAt, Reason = Reason,
     };
 }

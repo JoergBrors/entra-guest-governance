@@ -873,6 +873,38 @@ app.MapPost("/api/workloads/{workloadId:guid}/resources/attach", async (
     }
 });
 
+// Manueller Trigger fuer eine Discovery-Review (Erweiterung 2026-08-31 "Discovery-
+// Sichtbarkeit ueber Review"): reiht einen StartReview-Job mit Scope="discovery" ein
+// (siehe StartReviewHandler.StartDiscoveryReviewAsync) — nimmt ALLE tenant-weiten
+// Unclassified ResourceAccess-Eintraege als ReviewItems in eine neue ReviewInstance auf,
+// sichtbar unter GET /api/reviews wie jede andere Review. Aendert dabei nichts an
+// Assignments/Zugriffen (reiner Snapshot). ReviewDefinition wird nicht separat persistiert
+// (kein IReviewDefinitionRepository im Projekt) — die Id ist hier nur ein Korrelations-
+// Handle fuer die neue ReviewInstance, analog zum bestehenden Muster.
+app.MapPost("/api/reviews/trigger/discovery", async (
+    ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,
+    IWorkloadRepository workloadRepository, ProvisioningService provisioningService, CancellationToken ct) =>
+{
+    if (!userCtx.Current.IsGovernanceAdmin)
+    {
+        return Results.StatusCode(403);
+    }
+
+    var tenant = tenantCtx.Current;
+    var reviewDefinitionId = Guid.NewGuid();
+    var correlationId = Guid.NewGuid();
+    var hash = DesiredStateHasher.Hash("StartReview-discovery", tenant.PlatformTenantId, correlationId.ToString());
+
+    var job = await provisioningService.EnqueueJobAsync(
+        tenant.PlatformTenantId, tenant.DirectoryTenantId, JobTypes.StartReview,
+        "Tenant", tenant.DirectoryTenantId ?? string.Empty, hash,
+        new { ReviewDefinitionId = reviewDefinitionId, Scope = "discovery" },
+        correlationId, ct,
+        triggeredBy: userCtx.Current.Mail);
+
+    return Results.Ok(await ToJobStatusResponseAsync(tenant, job, workloadRepository, ct));
+});
+
 app.MapPost("/api/reviews/{reviewInstanceId:guid}/items/{reviewItemId:guid}/decision", async (
     Guid reviewInstanceId, Guid reviewItemId, ReviewDecisionBody body,
     ITenantContextAccessor tenantCtx, IPortalUserContextAccessor userCtx,

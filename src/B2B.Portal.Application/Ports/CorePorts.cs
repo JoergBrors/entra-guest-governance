@@ -175,6 +175,15 @@ public interface IResourceAccessRepository
 {
     Task<IReadOnlyList<ResourceAccess>> ListByGuestAsync(
         TenantContext tenant, Guid guestId, CancellationToken ct);
+
+    /// <summary>Alle Unclassified ResourceAccess eines Tenants, ueber alle Gaeste hinweg
+    /// (Erweiterung 2026-08-31 "Discovery-Sichtbarkeit ueber Review") — Grundlage fuer
+    /// StartReviewHandler, um entdeckte, aber noch nicht klassifizierte Zugriffe als
+    /// Discovery-ReviewItems aufzunehmen.</summary>
+    Task<IReadOnlyList<ResourceAccess>> ListUnclassifiedByTenantAsync(TenantContext tenant, CancellationToken ct);
+
+    Task<ResourceAccess?> GetAsync(TenantContext tenant, Guid id, CancellationToken ct);
+
     Task UpsertAsync(ResourceAccess access, CancellationToken ct);
 }
 

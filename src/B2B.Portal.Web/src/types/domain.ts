@@ -116,6 +116,11 @@ export interface WorkloadMutationResponse {
 export interface WorkloadAssignmentCounts {
   active: number;
   inactive: number;
+  /** Anzahl eindeutiger Entra-Objekte, die tatsächlich Mitglied einer Gruppen-/Team-Ressource
+   * dieses Workload im Mock-Entra-Verzeichnis sind (Ist-Zustand) — kann von active+inactive
+   * abweichen, wenn jemand ausserhalb des Portal-Workflows Mitglied wurde. null, wenn der
+   * Workload keine Gruppen-Ressourcen hat oder das Verzeichnis nicht verfügbar ist. */
+  directoryMemberCount?: number | null;
 }
 
 export type AssignmentStatus =
@@ -138,7 +143,11 @@ export type ReviewDecision = 'Pending' | 'Keep' | 'Remove' | 'Escalated';
 export interface ReviewItem {
   id: string;
   reviewInstanceId: string;
-  assignmentId: string;
+  /** Gesetzt bei einem klassischen Assignment-Review-Item; exklusiv zu resourceAccessId. */
+  assignmentId?: string | null;
+  /** Gesetzt bei einem Discovery-Review-Item (entdeckte, noch nicht formal zugewiesene
+   * Gruppenmitgliedschaft) — exklusiv zu assignmentId. */
+  resourceAccessId?: string | null;
   decision: ReviewDecision;
   decidedBy?: string | null;
   decidedAt?: string | null;

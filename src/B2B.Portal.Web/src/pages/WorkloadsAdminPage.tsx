@@ -487,10 +487,23 @@ export function WorkloadsAdminPage() {
                   <PatternSyncStatusView state={patternSyncStatus[w.id]} />
                 )}
                 <Text className={styles.meta} block size={200}>
-                  Nutzer: {counts[w.id] ? (
+                  Zuweisungen: {counts[w.id] ? (
                     <>Aktiv {counts[w.id].active} / Inaktiv {counts[w.id].inactive}</>
                   ) : '…'}
                 </Text>
+                {counts[w.id]?.directoryMemberCount != null && (
+                  <Text
+                    className={styles.meta}
+                    block
+                    size={200}
+                    style={counts[w.id].directoryMemberCount! > counts[w.id].active ? { color: tokens.colorPaletteMarigoldForeground1 } : undefined}
+                  >
+                    Mitglieder im Verzeichnis: {counts[w.id].directoryMemberCount}
+                    {counts[w.id].directoryMemberCount! > counts[w.id].active && (
+                      <> — mehr als formal zugewiesen, siehe <Button appearance="transparent" size="small" onClick={() => navigate('/reviews')}>Reviews</Button></>
+                    )}
+                  </Text>
+                )}
               </>
             )}
 
